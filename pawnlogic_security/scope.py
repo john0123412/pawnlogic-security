@@ -5,8 +5,9 @@ authorization from a target, and every ambiguous case denies. Callers pass the
 current time in explicitly so expiry is testable without a real clock.
 
 This module decides only whether a target is *in scope*. It is not a substitute
-for the host Network Policy or Operation Policy; both still run afterwards, and
-either can still deny something this module considers in scope.
+for the host Network Policy, which runs afterwards and can still deny something
+this module considers in scope. The host Operation Policy governs subprocess
+execution and is not on this path, because nothing here runs a subprocess.
 """
 
 from __future__ import annotations

@@ -6,6 +6,20 @@ agent host, distributed independently of the core package.
 The core `pawnlogic` distribution deliberately ships no security tools. This
 package adds them as an Extension that stays disabled until you enable it.
 
+## Status
+
+This is a contracts and scaffolding slice, not a usable security tool set. The
+authorization and evidence contracts are implemented and tested, but:
+
+- there is no way to set an Engagement Scope yet, so every tool call is refused
+  with `scope:no_scope`
+- passive reconnaissance and active discovery perform no real work; they return
+  the authorization verdict only
+- the `/security` commands and scope file format do not exist yet
+- the distribution is unpublished
+
+Do not read the sections below as a description of working functionality.
+
 ## Requirements
 
 - Python 3.10 or newer
@@ -49,8 +63,11 @@ expiring authorization record that names its targets:
 - **Active operations** additionally require a scope that permits active work.
 
 A scope only reports its own state. It never claims a target is allowed: the
-host Network Policy and Operation Policy run afterwards and can still refuse.
-Being in scope is necessary, never sufficient.
+host Network Policy runs afterwards and can still refuse. Being in scope is
+necessary, never sufficient.
+
+The host Operation Policy is not on this path, because nothing here runs a
+subprocess. It becomes a required gate when scanner-binary execution is added.
 
 ## Trust boundaries
 
