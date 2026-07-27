@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      core-ref:
+        description: "Ref of the PawnLogic core repository to build against"
+        required: false
+        default: ""
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -13,6 +18,13 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  # This package declares `pawnlogic>=0.3,<0.4`, which no PyPI release satisfies
+  # yet. Every job that installs this distribution therefore has to install a
+  # core wheel built from source first, or dependency resolution fails outright.
+  CORE_REPOSITORY: john0123412/PawnLogic
+  CORE_REF: ${{ inputs.core-ref || vars.PAWNLOGIC_CORE_REF || 'main' }}
 
 jobs:
   lint:
@@ -27,9 +39,54 @@ jobs:
       - run: python -m pip install --upgrade pip ruff
       - run: python -m ruff check . --output-format=github
 
+  # Built once and reused, so a matrix job cannot disagree with its siblings
+  # about which core it was tested against.
+  core-wheel:
+    name: "Build core wheel (${{ github.event.inputs.core-ref || 'default ref' }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the core repository
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: ${{ env.CORE_REF }}
+          path: core
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip build
+      - name: Build the core wheel
+        working-directory: core
+        run: python -m build --wheel
+      - name: Refuse a core that cannot satisfy this package
+        working-directory: core
+        run: |
+          python - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          wheel = next(Path("dist").glob("pawnlogic-*.whl"))
+          version = re.match(r"pawnlogic-([^-]+)-", wheel.name).group(1)
+          major, minor = (int(part) for part in version.split(".")[:2])
+          print(f"built core {version} from {wheel.name}")
+          if (major, minor) != (0, 3):
+              sys.exit(
+                  f"core {version} cannot satisfy pawnlogic>=0.3,<0.4; "
+                  "point CORE_REF at a 0.3.x ref"
+              )
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-wheel
+          path: core/dist/*.whl
+          retention-days: 1
+          if-no-files-found: error
+
   typecheck:
     name: "Type check (mypy)"
-    needs: lint
+    needs: [lint, core-wheel]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -37,16 +94,21 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-wheel
+          path: core-wheel
       # The core is installed so mypy resolves the real Extension contracts
       # rather than treating them as Any.
       - run: |
           python -m pip install --upgrade pip
+          python -m pip install core-wheel/*.whl
           python -m pip install ".[dev]"
       - run: python -m mypy
 
   test:
     name: "Tests (Python ${{ matrix.python-version }})"
-    needs: lint
+    needs: [lint, core-wheel]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -58,7 +120,18 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-wheel
+          path: core-wheel
       - run: |
           python -m pip install --upgrade pip
+          python -m pip install core-wheel/*.whl
           python -m pip install ".[dev]"
+      - name: Prove the core requirement resolved from the built wheel
+        run: python -m pip show pawnlogic | head -2
       - run: python -m pytest -q --tb=short
+        env:
+          # Never let a test touch a real runtime home.
+          PAWNLOGIC_HOME: ${{ runner.temp }}/pawnlogic-home
+          PAWNLOGIC_TEST_MODE: "true"

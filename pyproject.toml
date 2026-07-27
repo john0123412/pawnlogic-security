@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=68"]
+# 77.0.3 is the first release that accepts the PEP 639 SPDX license expression
+# below; older versions reject the string form of `license`.
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +10,15 @@ dynamic = ["version"]
 description = "Scope-gated security tooling for the PawnLogic agent host"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "PawnLogic Contributors" }]
 keywords = ["pawnlogic", "security", "extension", "reconnaissance"]
+# The deprecated "License :: OSI Approved" classifier is intentionally absent;
+# the SPDX expression above is the single declaration.
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
