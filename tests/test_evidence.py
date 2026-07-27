@@ -96,3 +96,69 @@ def test_timestamps_come_from_the_caller():
         outcome="allowed",
     )
     assert entry.recorded_at == 12345.0
+
+
+def test_record_detail_is_immutable():
+    log = EvidenceLog()
+    entry = log.record(
+        recorded_at=NOW,
+        scope_id="eng-1",
+        action="a",
+        target="lab.example.com",
+        outcome="allowed",
+        detail={"key": "value", "nested": {"inner": 42}},
+    )
+    # detail is stored as a frozen tuple, not a mutable dict
+    assert isinstance(entry.detail, tuple)
+    # attempting to mutate it raises
+    with pytest.raises((AttributeError, TypeError)):
+        entry.detail["key"] = "changed"  # type: ignore[index]
+
+
+def test_record_detail_round_trips_through_json():
+    log = EvidenceLog()
+    entry = log.record(
+        recorded_at=NOW,
+        scope_id="eng-1",
+        action="a",
+        target="lab.example.com",
+        outcome="allowed",
+        detail={"key": "value", "count": 3},
+    )
+    parsed = json.loads(entry.to_json())
+    assert parsed["detail"] == {"key": "value", "count": 3}
+
+
+def test_evidence_file_is_created_with_restrictive_permissions(tmp_path: Path):
+    import os
+    import stat
+
+    path = tmp_path / "security" / "evidence.jsonl"
+    log = EvidenceLog(path=path)
+    log.record(
+        recorded_at=NOW,
+        scope_id="eng-1",
+        action="a",
+        target="lab.example.com",
+        outcome="allowed",
+    )
+    assert path.exists()
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+
+
+def test_evidence_directory_is_created_with_restrictive_permissions(tmp_path: Path):
+    import os
+    import stat
+
+    path = tmp_path / "security" / "evidence.jsonl"
+    log = EvidenceLog(path=path)
+    log.record(
+        recorded_at=NOW,
+        scope_id="eng-1",
+        action="a",
+        target="lab.example.com",
+        outcome="allowed",
+    )
+    mode = stat.S_IMODE(os.stat(path.parent).st_mode)
+    assert mode == 0o700, f"expected 0700, got {oct(mode)}"

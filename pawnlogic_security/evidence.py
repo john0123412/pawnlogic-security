@@ -11,10 +11,13 @@ on the way out, because a record that was never written cannot leak later.
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 SCHEMA_VERSION = 1
 
@@ -82,9 +85,32 @@ def redact(value: object) -> object:
     return redact_text(str(value))
 
 
+def _freeze(value: object) -> object:
+    """Recursively convert a JSON-compatible value to an immutable form."""
+    if isinstance(value, dict):
+        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _unfreeze(value: object) -> object:
+    """Recursively convert a frozen value back to JSON-compatible form."""
+    if isinstance(value, tuple) and value and isinstance(value[0], tuple) and len(value[0]) == 2:
+        return {k: _unfreeze(v) for k, v in value}
+    if isinstance(value, tuple):
+        return [_unfreeze(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class EvidenceRecord:
-    """One immutable observation, already redacted."""
+    """One immutable observation, already redacted.
+
+    ``detail`` is stored in a frozen form so the record is genuinely immutable
+    after construction. ``to_json`` converts it back to a JSON-serializable
+    mapping.
+    """
 
     schema_version: int
     recorded_at: float
@@ -92,7 +118,7 @@ class EvidenceRecord:
     action: str
     target: str
     outcome: str
-    detail: dict[str, object] = field(default_factory=dict)
+    detail: tuple[tuple[str, object], ...] = ()
 
     def to_json(self) -> str:
         return json.dumps(
@@ -103,7 +129,7 @@ class EvidenceRecord:
                 "action": self.action,
                 "target": self.target,
                 "outcome": self.outcome,
-                "detail": self.detail,
+                "detail": _unfreeze(self.detail),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -141,11 +167,26 @@ class EvidenceLog:
             action=redact_text(str(action)),
             target=redact_text(str(target)),
             outcome=redact_text(str(outcome)),
-            detail=redacted_detail,
+            detail=cast(tuple[tuple[str, object], ...], _freeze(redacted_detail)),
         )
         self._records.append(entry)
         if self._path is not None:
             self._path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(self._path.parent, stat.S_IRWXU)
+            except OSError:
+                pass  # not all filesystems support chmod
+            if not self._path.exists():
+                fd = os.open(
+                    str(self._path),
+                    os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                    stat.S_IRUSR | stat.S_IWUSR,
+                )
+                try:
+                    os.fdopen(fd, "a", encoding="utf-8").close()
+                except Exception:
+                    os.close(fd)
+                    raise
             with self._path.open("a", encoding="utf-8") as handle:
                 handle.write(entry.to_json() + "\n")
         return entry

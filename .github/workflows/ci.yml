@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      core-ref:
+        description: "Override the source ref for the newest PawnLogic 0.3.x lane"
+        required: false
+        default: ""
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -13,6 +18,9 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  CORE_REPOSITORY: john0123412/PawnLogic
 
 jobs:
   lint:
@@ -27,9 +35,80 @@ jobs:
       - run: python -m pip install --upgrade pip ruff
       - run: python -m ruff check . --output-format=github
 
+  core-wheel:
+    name: "Resolve PawnLogic ${{ matrix.core.lane }} (${{ matrix.core.requirement }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        core:
+          - lane: oldest
+            requirement: "pawnlogic==0.3.0"
+            source-ref: ${{ vars.PAWNLOGIC_OLDEST_03_REF || 'main' }}
+          - lane: newest
+            requirement: "pawnlogic>=0.3,<0.4"
+            source-ref: ${{ inputs.core-ref || vars.PAWNLOGIC_NEWEST_03_REF || 'main' }}
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip build packaging
+      - id: pypi-core
+        name: Try the supported core release from PyPI
+        continue-on-error: true
+        run: |
+          python -m pip download \
+            --only-binary=:all: \
+            --no-deps \
+            --dest core-wheel \
+            '${{ matrix.core.requirement }}'
+      - name: Build the core fallback from source
+        if: steps.pypi-core.outcome == 'failure'
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.CORE_REPOSITORY }}
+          ref: ${{ matrix.core.source-ref }}
+          path: core-source
+      - name: Build the fallback wheel
+        if: steps.pypi-core.outcome == 'failure'
+        working-directory: core-source
+        run: python -m build --wheel --outdir ../core-wheel
+      - name: Verify the resolved core satisfies its lane
+        env:
+          CORE_REQUIREMENT: ${{ matrix.core.requirement }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          from packaging.specifiers import SpecifierSet
+          from packaging.version import Version
+
+          wheels = list(Path("core-wheel").glob("pawnlogic-*.whl"))
+          if len(wheels) != 1:
+              sys.exit(f"expected exactly one PawnLogic wheel, found {wheels}")
+          match = re.match(r"pawnlogic-([^-]+)-", wheels[0].name)
+          if match is None:
+              sys.exit(f"cannot read PawnLogic version from {wheels[0].name}")
+          version = Version(match.group(1))
+          specifier = SpecifierSet(os.environ["CORE_REQUIREMENT"].removeprefix("pawnlogic"))
+          print(f"resolved {wheels[0].name} for {os.environ['CORE_REQUIREMENT']}")
+          if version not in specifier:
+              sys.exit(f"PawnLogic {version} does not satisfy {specifier}")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-wheel-${{ matrix.core.lane }}
+          path: core-wheel/*.whl
+          retention-days: 1
+          if-no-files-found: error
+
   typecheck:
-    name: "Type check (mypy)"
-    needs: lint
+    name: "Type check (mypy, newest PawnLogic)"
+    needs: [lint, core-wheel]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -37,28 +116,42 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      # The core is installed so mypy resolves the real Extension contracts
-      # rather than treating them as Any.
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-wheel-newest
+          path: core-wheel
       - run: |
           python -m pip install --upgrade pip
+          python -m pip install core-wheel/*.whl
           python -m pip install ".[dev]"
       - run: python -m mypy
 
   test:
-    name: "Tests (Python ${{ matrix.python-version }})"
-    needs: lint
+    name: "Tests (Python ${{ matrix.python-version }}, PawnLogic ${{ matrix.core-lane }})"
+    needs: [lint, core-wheel]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
+        core-lane: [oldest, newest]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: core-wheel-${{ matrix.core-lane }}
+          path: core-wheel
       - run: |
           python -m pip install --upgrade pip
+          python -m pip install core-wheel/*.whl
           python -m pip install ".[dev]"
+      - name: Prove the selected core lane remains installed
+        run: python -m pip show pawnlogic | head -2
       - run: python -m pytest -q --tb=short
+        env:
+          PAWNLOGIC_HOME: ${{ runner.temp }}/pawnlogic-home
+          PAWNLOGIC_TEST_MODE: "true"

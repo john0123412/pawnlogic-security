@@ -1,0 +1,246 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Package index used for this manual release rehearsal"
+        required: true
+        type: choice
+        options: [testpypi]
+        default: testpypi
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: "Build and verify"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.artifacts.outputs.version }}
+      wheel-file: ${{ steps.artifacts.outputs.wheel-file }}
+      wheel-sha256: ${{ steps.artifacts.outputs.wheel-sha256 }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip build twine
+      - name: Verify release source is on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"
+      - name: Verify a production tag belongs to main and matches the package
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          PACKAGE_VERSION="$(python -c 'import pawnlogic_security; print(pawnlogic_security.__version__)')"
+          EXPECTED_TAG="v${PACKAGE_VERSION}"
+          if [ "$GITHUB_REF_NAME" != "$EXPECTED_TAG" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+      - name: Validate the matching changelog section before production upload
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          from pawnlogic_security import __version__ as version
+
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          heading = re.compile(
+              rf"^## \[{re.escape(version)}\](?:\s+-\s+.*)?$",
+              re.MULTILINE,
+          )
+          match = heading.search(changelog)
+          if match is None:
+              sys.exit(f"CHANGELOG.md has no release section for {version}")
+          next_heading = re.search(r"^## ", changelog[match.end():], re.MULTILINE)
+          end = (
+              match.end() + next_heading.start()
+              if next_heading is not None
+              else len(changelog)
+          )
+          notes = changelog[match.start():end].strip()
+          if not notes.partition("\n")[2].strip():
+              sys.exit(f"CHANGELOG.md release section for {version} is empty")
+          PY
+      - name: Build wheel and sdist
+        run: python -m build
+      - name: Inspect wheel contents
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          import sys
+          wheel = next(Path("dist").glob("*.whl"))
+          with ZipFile(wheel) as zf:
+              names = zf.namelist()
+              has_security = any("pawnlogic_security/" in n for n in names)
+              has_tests = any("tests/" in n for n in names)
+              has_skills = any("skills/" in n for n in names)
+              print(f"wheel: {wheel.name}")
+              print(f"  pawnlogic_security: {has_security}")
+              print(f"  tests: {has_tests}")
+              print(f"  skills: {has_skills}")
+              if not has_security:
+                  sys.exit("package not found in wheel")
+              if has_tests:
+                  sys.exit("test files leaked into wheel")
+              if has_skills:
+                  sys.exit("skill packs leaked into wheel")
+          PY
+      - run: python -m twine check dist/*
+      - id: artifacts
+        name: Verify exactly one wheel and one sdist
+        run: |
+          python tools/verify_release_artifacts.py \
+            --dist dist \
+            --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
+          retention-days: 5
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: "Publish to TestPyPI"
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  smoke-testpypi:
+    name: "Smoke TestPyPI wheel"
+    needs: [build, publish-testpypi]
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+      EXPECTED_WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install and verify the uploaded wheel in a fresh environment
+        run: |
+          python tools/release_smoke.py \
+            --index-url "https://test.pypi.org/simple/" \
+            --extra-index-url "https://pypi.org/simple/" \
+            --version "$EXPECTED_VERSION" \
+            --wheel-sha256 "$EXPECTED_WHEEL_SHA256"
+
+  publish-pypi:
+    name: "Publish to PyPI"
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  smoke-pypi:
+    name: "Smoke PyPI wheel"
+    needs: [build, publish-pypi]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      EXPECTED_VERSION: ${{ needs.build.outputs.version }}
+      EXPECTED_WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install and verify the uploaded wheel in a fresh environment
+        run: |
+          python tools/release_smoke.py \
+            --index-url "https://pypi.org/simple/" \
+            --version "$EXPECTED_VERSION" \
+            --wheel-sha256 "$EXPECTED_WHEEL_SHA256"
+
+  github-release:
+    name: "Create GitHub Release"
+    needs: [build, smoke-pypi]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Extract the matching changelog section
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"]
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          heading = re.compile(
+              rf"^## \[{re.escape(version)}\](?:\s+-\s+.*)?$",
+              re.MULTILINE,
+          )
+          match = heading.search(changelog)
+          if match is None:
+              sys.exit(f"CHANGELOG.md has no release section for {version}")
+          next_heading = re.search(r"^## ", changelog[match.end():], re.MULTILINE)
+          end = (
+              match.end() + next_heading.start()
+              if next_heading is not None
+              else len(changelog)
+          )
+          notes = changelog[match.start():end].strip()
+          if not notes.partition("\n")[2].strip():
+              sys.exit(f"CHANGELOG.md release section for {version} is empty")
+          Path("release-notes.md").write_text(notes + "\n", encoding="utf-8")
+          PY
+      - name: Publish the GitHub Release after the PyPI smoke
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md
