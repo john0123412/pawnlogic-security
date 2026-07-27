@@ -5,13 +5,11 @@ from __future__ import annotations
 import importlib.metadata as metadata
 from pathlib import Path
 
-import pytest
 from core.extension_contracts import (
     ExtensionContext,
     ExtensionContributions,
     ExtensionManifest,
 )
-from core.network_policy import NetworkPolicy
 from core.tool_registry import ToolSpec
 
 from pawnlogic_security.extension import (
@@ -89,16 +87,42 @@ def test_manifest_declares_a_narrow_core_range_and_api_version():
     assert manifest.api_version == API_VERSION
 
 
-def test_start_returns_tool_contributions_the_host_can_register(tmp_path: Path):
+def test_start_returns_commands_but_no_tools(tmp_path: Path):
     extension = build_extension()
     contributions = extension.start(make_context(tmp_path))
 
+    assert isinstance(contributions, ExtensionContributions)
+    assert not contributions.tools  # tools appear only when a scope is active
+    assert contributions.commands  # commands are always available
+    assert extension.started is True
+
+
+def test_contribute_returns_tools_when_scope_is_active(tmp_path: Path):
+    extension = build_extension()
+    context = make_context(tmp_path)
+    extension.start(context)
+
+    # Load a scope so the tool set becomes knowable.
+    scope_file = tmp_path / "scope.json"
+    scope_file.write_text(
+        """{
+        "version": 1,
+        "identifier": "test-engagement",
+        "authorized_by": "tester",
+        "expires_at": 9999999999.0,
+        "targets": ["example.com"],
+        "allow_active": false
+    }""",
+        encoding="utf-8",
+    )
+    extension.scope_manager.set_scope(scope_file)
+
+    contributions = extension.contribute(context)
     assert isinstance(contributions, ExtensionContributions)
     assert contributions.tools
     assert all(isinstance(spec, ToolSpec) for spec in contributions.tools)
     names = {spec.name for spec in contributions.tools}
     assert names == {"security_passive_recon", "security_active_discovery"}
-    assert extension.started is True
 
 
 def test_stop_releases_state_and_is_safe_before_start():
@@ -116,34 +140,36 @@ def test_start_then_stop_round_trips(tmp_path: Path):
     assert extension.evidence is None
 
 
-def test_a_failing_start_leaves_nothing_registered(tmp_path: Path):
-    """A partial start must not hand the host half a tool set."""
-
-    class ExplodingPolicy(NetworkPolicy):
-        def __init__(self) -> None:
-            raise RuntimeError("policy construction failed")
-
-    extension = SecurityExtension(policy=None)
+def test_start_succeeds_and_records_state(tmp_path: Path):
+    extension = SecurityExtension()
     context = make_context(tmp_path)
+    contributions = extension.start(context)
 
-    # Force the failure inside start() by making ToolSpec construction fail.
-    import pawnlogic_security.extension as module
-
-    original = module.NetworkPolicy
-    module.NetworkPolicy = ExplodingPolicy  # type: ignore[misc]
-    try:
-        with pytest.raises(RuntimeError):
-            extension.start(context)
-    finally:
-        module.NetworkPolicy = original  # type: ignore[misc]
-
-    assert extension.started is False
-    assert extension.evidence is None
-    assert context.tools.registered == []  # type: ignore[attr-defined]
+    assert extension.started is True
+    assert extension.evidence is not None
+    assert extension.scope_manager is not None
+    assert contributions.commands
+    assert not contributions.tools  # tools are scope-gated
 
 
 def test_tools_carry_a_real_trust_boundary_and_capability(tmp_path: Path):
-    contributions = build_extension().start(make_context(tmp_path))
+    extension = build_extension()
+    context = make_context(tmp_path)
+    extension.start(context)
+    scope_file = tmp_path / "scope.json"
+    scope_file.write_text(
+        """{
+        "version": 1,
+        "identifier": "test-engagement",
+        "authorized_by": "tester",
+        "expires_at": 9999999999.0,
+        "targets": ["example.com"],
+        "allow_active": false
+    }""",
+        encoding="utf-8",
+    )
+    extension.scope_manager.set_scope(scope_file)
+    contributions = extension.contribute(context)
     for spec in contributions.tools:
         assert spec.capabilities == frozenset({"network"})
         assert spec.trust.value == "private_network"
