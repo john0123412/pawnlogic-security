@@ -12,10 +12,12 @@ re-contribution so the host's tool set reflects the new state.
 
 from __future__ import annotations
 
+import shlex
 import time
 from collections.abc import Callable
 from pathlib import Path
 
+from core.commands import CommandContext
 from core.extension_contracts import (
     CommandContribution,
     ExtensionContext,
@@ -35,6 +37,12 @@ from pawnlogic_security.tools import (
     SecurityToolContext,
     make_active_discovery_handler,
     make_passive_recon_handler,
+)
+from pawnlogic_security.workflows import (
+    WorkflowError,
+    WorkflowRunner,
+    WorkflowRunStore,
+    render_objective_plan,
 )
 
 API_VERSION = 1
@@ -68,9 +76,14 @@ class SecurityExtension:
     ) -> None:
         self._policy = policy
         self._clock = clock or time.time
+        self._runtime_policy: NetworkPolicy | None = None
         self._context: SecurityToolContext | None = None
         self._evidence: EvidenceLog | None = None
+        self._default_evidence_path: Path | None = None
+        self._evidence_path: Path | None = None
         self._scope_manager: ScopeManager | None = None
+        self._workflow_runner: WorkflowRunner | None = None
+        self._run_store: WorkflowRunStore | None = None
         self._extension_context: ExtensionContext | None = None
         self._started = False
 
@@ -92,36 +105,40 @@ class SecurityExtension:
         evidence = EvidenceLog(path=evidence_path)
         policy = self._policy if self._policy is not None else NetworkPolicy()
 
-        # The scope manager's callback triggers a re-contribution through the
-        # host. The callback is set after the Extension is fully constructed,
-        # so a scope change during start() would be safe but unnecessary.
-        scope_manager = ScopeManager(clock=self._clock)
+        scope_manager = ScopeManager(
+            recontribute=self._do_recontribute,
+            clock=self._clock,
+        )
 
         tool_context = SecurityToolContext(
             policy=policy,
             evidence=evidence,
             clock=self._clock,
             scope=scope_manager.scope,
+            scope_manager=scope_manager,
             interactive=False,
         )
 
-        commands = (
-            CommandContribution(
-                name="security",
-                handler=self._handle_security_command,
-                metadata={"subcommands": ["scope", "status"]},
-            ),
-        )
+        commands = self._command_contributions()
 
         # Only record state once construction has fully succeeded.
+        self._runtime_policy = policy
         self._context = tool_context
         self._evidence = evidence
+        self._default_evidence_path = evidence_path
+        self._evidence_path = evidence_path
         self._scope_manager = scope_manager
+        self._run_store = WorkflowRunStore(
+            context.runtime_home / "security" / "runs"
+        )
+        self._workflow_runner = WorkflowRunner(
+            policy=policy,
+            evidence=evidence,
+            clock=self._clock,
+            run_store=self._run_store,
+        )
         self._extension_context = context
         self._started = True
-
-        # Wire the callback now that everything is ready.
-        scope_manager._recontribute = self._do_recontribute
 
         # Commands only: the tool set is not knowable until a scope is set.
         return ExtensionContributions(commands=commands)
@@ -135,46 +152,67 @@ class SecurityExtension:
         del context  # the Extension uses its own stored state
         scope = self._scope_manager.scope if self._scope_manager else None
         if scope is None or scope.is_expired(self._clock()):
-            return ExtensionContributions()
+            return ExtensionContributions(commands=self._command_contributions())
 
-        policy = self._policy if self._policy is not None else NetworkPolicy()
-        evidence = self._evidence
+        policy = self._runtime_policy or NetworkPolicy()
+        evidence = self._configure_scope_storage()
+        if evidence is None:
+            return ExtensionContributions(commands=self._command_contributions())
 
         tool_context = SecurityToolContext(
             policy=policy,
             evidence=evidence,
             clock=self._clock,
             scope=scope,
+            scope_manager=self._scope_manager,
             interactive=False,
         )
+        self._context = tool_context
 
-        return ExtensionContributions(
-            tools=(
+        tools: list[ToolSpec] = []
+        if scope.allows_action("passive"):
+            tools.append(
                 ToolSpec(
                     name="security_passive_recon",
                     handler=make_passive_recon_handler(tool_context),
                     schema=PASSIVE_RECON_SCHEMA,
                     trust=TrustBoundaryKind.PRIVATE_NETWORK,
                     capabilities=frozenset({"network"}),
-                ),
+                )
+            )
+        if (
+            scope.allows_action("active")
+            and scope.allow_active
+            and bool(scope.ports)
+        ):
+            tools.append(
                 ToolSpec(
                     name="security_active_discovery",
                     handler=make_active_discovery_handler(tool_context),
                     schema=ACTIVE_DISCOVERY_SCHEMA,
                     trust=TrustBoundaryKind.PRIVATE_NETWORK,
                     capabilities=frozenset({"network"}),
-                ),
+                )
             )
+
+        return ExtensionContributions(
+            tools=tuple(tools),
+            commands=self._command_contributions(),
         )
 
     def stop(self) -> None:
         """Release state. Safe to call when start never succeeded."""
         if self._scope_manager is not None:
-            self._scope_manager._recontribute = None
+            self._scope_manager.close()
         self._scope_manager = None
+        self._workflow_runner = None
+        self._run_store = None
         self._extension_context = None
         self._context = None
         self._evidence = None
+        self._default_evidence_path = None
+        self._evidence_path = None
+        self._runtime_policy = None
         self._started = False
 
     def _do_recontribute(self) -> object:
@@ -187,19 +225,117 @@ class SecurityExtension:
             return None
         return callback()
 
-    def _handle_security_command(self, *args: object, **kwargs: object) -> str:
-        """Route /security subcommands to the scope manager."""
-        # The host passes the full argument list. Parse the first arg as the
-        # subcommand; the rest is positional.
-        parts = [str(a) for a in args] if args else []
-        if not parts:
-            return self._handle_status()
-        subcommand = parts[0]
+    def _configure_scope_storage(self) -> EvidenceLog | None:
+        """Point evidence and run records at the active Scope's directory."""
+        scope_manager = self._scope_manager
+        default_path = self._default_evidence_path
+        if scope_manager is None or default_path is None:
+            return self._evidence
+        evidence_path = scope_manager.evidence_path(default_path)
+        if evidence_path == self._evidence_path and self._evidence is not None:
+            return self._evidence
+
+        evidence = EvidenceLog(path=evidence_path)
+        run_store = WorkflowRunStore(evidence_path.parent / "runs")
+        policy = self._runtime_policy or NetworkPolicy()
+        self._evidence = evidence
+        self._evidence_path = evidence_path
+        self._run_store = run_store
+        self._workflow_runner = WorkflowRunner(
+            policy=policy,
+            evidence=evidence,
+            clock=self._clock,
+            run_store=run_store,
+        )
+        return evidence
+
+    def _command_contributions(self) -> tuple[CommandContribution, ...]:
+        """Return the complete command set for start and every rebuild."""
+        return (
+            CommandContribution(
+                name="/security",
+                handler=self._handle_security_command,
+                metadata={
+                    "subcommands": [
+                        "scope",
+                        "status",
+                        "plan",
+                        "run",
+                        "evidence",
+                    ]
+                },
+            ),
+        )
+
+    async def _handle_security_command(self, context: CommandContext) -> None:
+        """Route one host command and write its result through the active sink."""
+        subcommand = context.arg.strip()
         if subcommand == "status":
-            return self._handle_status()
-        if subcommand == "scope":
-            return self._handle_scope(parts[1:])
-        return f"unknown subcommand: {subcommand}. " "Available: scope, status"
+            output = self._handle_status()
+        elif subcommand == "scope":
+            try:
+                scope_args = shlex.split(context.arg2)
+            except ValueError as error:
+                output = f"scope arguments rejected: {error}"
+            else:
+                output = self._handle_scope(scope_args)
+        elif subcommand == "plan":
+            try:
+                output = render_objective_plan(context.arg2)
+            except WorkflowError as error:
+                output = f"error: {error}"
+        elif subcommand == "run":
+            output = await self._handle_run(context.arg2)
+        elif subcommand == "evidence":
+            output = self._handle_evidence(context.arg2)
+        elif not subcommand:
+            output = self._handle_status()
+        else:
+            output = (
+                f"unknown subcommand: {subcommand}. "
+                "Available: scope, status, plan, run, evidence"
+            )
+        context.sink.print(output)
+
+    async def _handle_run(self, raw_workflow: str) -> str:
+        parts = raw_workflow.split()
+        if len(parts) != 1:
+            return "usage: /security run <workflow>"
+        if self._scope_manager is None or self._workflow_runner is None:
+            return "error: Extension not started"
+        self._configure_scope_storage()
+        if self._workflow_runner is None:
+            return "error: workflow runner is unavailable"
+        try:
+            result = await self._workflow_runner.run(
+                parts[0],
+                self._scope_manager,
+            )
+        except WorkflowError as error:
+            return f"error: {error}"
+        return result.render()
+
+    def _handle_evidence(self, raw_args: str) -> str:
+        parts = raw_args.split()
+        if self._run_store is None:
+            return "error: Extension not started"
+        if parts == ["list"]:
+            summaries = self._run_store.list_runs()
+            if not summaries:
+                return "no workflow runs recorded"
+            return "\n".join(
+                (
+                    f"{item.run_id} workflow={item.workflow} "
+                    f"scope={item.scope_id} recorded_at={item.recorded_at}"
+                )
+                for item in summaries
+            )
+        if len(parts) == 2 and parts[0] == "export":
+            try:
+                return self._run_store.export(parts[1])
+            except WorkflowError as error:
+                return f"error: {error}"
+        return "usage: /security evidence list|export <run-id>"
 
     def _handle_status(self) -> str:
         if self._scope_manager is None:
@@ -237,7 +373,9 @@ class SecurityExtension:
         if not path.is_file():
             return f"scope file not found: {path}"
         try:
-            return self._scope_manager.set_scope(path)
+            message = self._scope_manager.set_scope(path)
+            self._configure_scope_storage()
+            return message
         except ValueError as error:
             return f"scope rejected: {error}"
 

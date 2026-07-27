@@ -165,15 +165,17 @@ def validate(data: dict[str, Any]) -> ScopeFile:
     if not isinstance(destructive, bool):
         raise ValueError("destructive must be a boolean")
 
-    max_requests = _optional_positive_int(data, "max_requests")
-    max_concurrency = _optional_positive_int(data, "max_concurrency")
-    max_duration_raw = data.get("max_duration", 0)
+    max_requests = _require_positive_int(data, "max_requests", "max_requests")
+    max_concurrency = _require_positive_int(
+        data, "max_concurrency", "max_concurrency"
+    )
+    max_duration_raw = data.get("max_duration")
     if not isinstance(max_duration_raw, (int, float)) or isinstance(
         max_duration_raw, bool
     ):
-        raise ValueError("max_duration must be a non-negative number")
-    if max_duration_raw < 0:
-        raise ValueError("max_duration must be non-negative")
+        raise ValueError("max_duration must be a positive number")
+    if max_duration_raw <= 0:
+        raise ValueError("max_duration must be positive")
     evidence_dir = _optional_string(data, "evidence_dir")
 
     raw_meta = data.get("metadata", {})

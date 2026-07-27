@@ -10,31 +10,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Target version `0.1.0`. Nothing has been published to PyPI or TestPyPI, so this
 section stays undated until a release is authorized.
 
-Contracts and scaffolding only. This is **not** a usable security tool set: no
-Engagement Scope can be set yet, so every tool call is refused with
-`scope:no_scope`, and the reconnaissance tools return an authorization verdict
-without performing any network work.
-
 ### Added
-- Added an Engagement Scope value type with explicit targets, an expiry, and an
-  authorization record. Absent, expired, unmatched, and malformed targets all
-  deny, and a scope can never widen itself. Scope files, persistence, CIDR and
-  port ranges, exclusions, and request/concurrency/duration budgets are not
-  implemented yet.
-- Added append-only evidence records with a schema version, caller-supplied
-  timestamps, and credential redaction applied before anything is written.
-- Added passive reconnaissance and bounded active discovery tool handlers. Each
-  requires a valid scope, defers to the host Network Policy, and refuses when
-  non-interactive confirmation is unavailable. Neither performs DNS, TLS,
-  HTTP-header, technology, port, or service work yet.
-- Added a PawnLogic Extension exported through the `pawnlogic.extensions` entry
-  point group. Discovery reads metadata without importing this package, and the
-  Extension stays disabled until it is explicitly enabled. The Extension
-  contributes no commands yet, so a host session has no way to supply a scope.
+
+- Added a versioned Engagement Scope file with exact hosts, CIDRs, exclusions,
+  explicit ports, passive/active actions, destructive-action rejection,
+  expiry, and request, concurrency, and duration budgets.
+- Added real stdlib-backed passive DNS, TLS, HTTP-header, and technology
+  reconnaissance plus bounded active port discovery. Both remain behind
+  Engagement Scope and host Network Policy.
+- Added append-only evidence records with schema versions, caller-supplied
+  timestamps, restrictive permissions, and credential redaction before write.
+- Added the explicitly enabled PawnLogic Extension and `/security scope
+  set|clear|show`, `/security status`, `/security plan`, `/security run`, and
+  `/security evidence list|export` commands.
+- Added `pawn-security scope validate <scope-file>` and `pawn-security run
+  <workflow> --scope <scope-file>`.
+- Added schema-versioned, workflow-versioned built-in manifests for
+  `passive-recon` and `active-discovery`. Direct and hosted execution share the
+  same scope-gated runner.
+- Added canonical local workflow run records, safe run-ID-only listing/export,
+  and deterministic no-execution planning that proposes passive reconnaissance
+  first. Scope-relative `evidence_dir` values are resolved from the scope file
+  directory; runtime-home storage is the fallback when no directory is set.
+- Added an optional, default-disabled JSON child-process adapter with host
+  Operation Policy checks, literal argv execution, bounded input/output,
+  timeout process-group cleanup, a scrubbed environment, and output redaction.
+  No built-in workflow invokes it.
+
+### Fixed
+
+- Fixed the Extension command contribution to use the canonical `/security`
+  verb and the host's async `CommandContext`, with all output routed through
+  the active sink.
+- Fixed re-contribution to return the complete current contribution set, so
+  `/security` remains registered when scope changes add or withdraw tools.
+- Fixed Tool visibility so passive-only scopes expose only passive
+  reconnaissance; active discovery additionally requires the active action,
+  active authorization, and explicit ports.
+- Removed direct writes to `ScopeManager` private callback state; Extension
+  lifecycle integration now uses public construction and shutdown interfaces.
 
 ### Security
-- Tool arguments are untrusted. Naming a target never authorizes it, and no
-  argument can assert scope validity or authorization on its own.
-- Active operations additionally require a scope that permits active work.
-- The host Operation Policy governs subprocess execution and is not on any path
-  in this package, because nothing here runs a subprocess.
+
+- Workflow execution refuses absent or expired scope, exhausted request
+  budgets, active workflows without active authorization, and manifests that
+  would require automatic CIDR expansion.
+- Workflow run files use restrictive permissions, redact rendered outputs, do
+  not overwrite a different existing run, and can be exported only by a
+  fixed-format run ID.
+- Destructive workflows, external scanner integrations, HTTP replay, workflow
+  YAML loading, MCP execution, and CIDR expansion remain unimplemented.

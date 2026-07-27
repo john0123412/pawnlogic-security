@@ -3,103 +3,188 @@
 Scope-gated security tooling for the [PawnLogic](https://github.com/john0123412/PawnLogic)
 agent host, distributed independently of the core package.
 
-The core `pawnlogic` distribution deliberately ships no security tools. This
-package adds them as an Extension that stays disabled until you enable it.
+Installing this package does not authorize or enable it. The PawnLogic
+Extension stays disabled until an operator explicitly enables it, and its
+network tools remain unavailable until a valid Engagement Scope is active.
 
 ## Status
 
-This is a contracts and scaffolding slice, not a usable security tool set. The
-authorization and evidence contracts are implemented and tested, but:
+This is an unpublished `0.1.0` alpha. The current checkout implements:
 
-- there is no way to set an Engagement Scope yet, so every tool call is refused
-  with `scope:no_scope`
-- passive reconnaissance and active discovery perform no real work; they return
-  the authorization verdict only
-- the `/security` commands and scope file format do not exist yet
-- the distribution is unpublished
+- a versioned Engagement Scope file with exact hosts, CIDRs, exclusions,
+  explicit ports, passive/active actions, expiry, and request, concurrency, and
+  duration budgets
+- scope-gated passive DNS, TLS, HTTP-header, and technology reconnaissance
+- scope-gated bounded active port discovery
+- append-only redacted evidence records
+- two built-in, versioned workflows shared by `pawn-security` and `/security`
+- reproducible workflow plans and versioned local run records
+- an optional, default-disabled JSON child-process adapter with Operation Policy
+  checks, bounded I/O, timeout cleanup, environment isolation, and output
+  redaction
 
-Do not read the sections below as a description of working functionality.
+It does not implement HTTP replay, external scanner adapters, workflow YAML
+loading, CIDR expansion, exploit or destructive workflows, MCP execution, or
+an AI-generated planner. No built-in workflow invokes the optional child
+adapter. No release has been published to PyPI or TestPyPI.
 
 ## Requirements
 
 - Python 3.10 or newer
 - `pawnlogic>=0.3,<0.4`
 
-## Install
+## Install from a checkout
 
 ```bash
-pip install pawnlogic-security
+python -m pip install -e .
 ```
 
-Installing this distribution is **not** authorization to run it. Nothing is
-loaded or executed until the Extension is explicitly enabled.
+Nothing is loaded merely because the distribution is installed.
 
-## Enable
+## Enable in PawnLogic
 
-Inside PawnLogic:
-
-```
+```text
 /extension list
 /extension enable security
 /extension status security
 ```
 
-Disable it the same way:
+The Extension contributes `/security` after enablement:
 
+```text
+/security status
+/security scope show
+/security scope set <scope-file>
+/security scope clear
+/security plan <objective>
+/security run <workflow>
+/security evidence list
+/security evidence export <run-id>
 ```
+
+`/security` is an async host command and writes through the active PawnLogic
+output sink. Scope changes rebuild the complete contribution set atomically:
+the command remains present while security tools appear or disappear.
+
+Disable the Extension with:
+
+```text
 /extension disable security
 ```
 
 ## Engagement Scope
 
-Every operation requires an active Engagement Scope. A scope is an explicit,
-expiring authorization record that names its targets:
+Every operation requires an explicit, unexpired Engagement Scope. A minimal
+passive scope file looks like:
 
-- **No scope** denies.
-- **An expired scope** denies.
-- **A target the scope does not name** denies. Wildcards are not supported, and
-  a subdomain is not covered by its parent.
-- **A malformed target** denies rather than raising.
-- **Active operations** additionally require a scope that permits active work.
+```json
+{
+  "version": 1,
+  "identifier": "authorized-review",
+  "authorized_by": "security-team",
+  "reference": "CHANGE-1234",
+  "expires_at": 4102444800,
+  "targets": ["app.example.com"],
+  "exclude": [],
+  "ports": ["443"],
+  "allow_active": false,
+  "actions": ["passive"],
+  "destructive": false,
+  "max_requests": 20,
+  "max_concurrency": 1,
+  "max_duration": 300,
+  "evidence_dir": "evidence"
+}
+```
 
-A scope only reports its own state. It never claims a target is allowed: the
-host Network Policy runs afterwards and can still refuse. Being in scope is
-necessary, never sufficient.
+Active discovery additionally requires `allow_active: true`, the `active`
+action, and explicit ports, for example `"ports": ["443", "8000-8010"]`.
+Destructive authorization is rejected because destructive workflows are not
+implemented.
 
-The host Operation Policy is not on this path, because nothing here runs a
-subprocess. It becomes a required gate when scanner-binary execution is added.
+The passive example explicitly authorizes port `443` because TLS inspection and
+HTTPS header collection make network connections even though they do not send
+active probes.
 
-## Trust boundaries
+Scope is necessary but never sufficient. The host Network Policy runs after
+scope validation and may still refuse the target. Resolved addresses and
+redirect changes must remain in scope. Model-provided tool arguments cannot
+grant authorization.
 
-- Tool arguments come from a model and are untrusted. Naming a target does not
-  authorize it, and no argument can assert scope validity or authorization.
-- Non-interactive sessions fail closed. A tool invoked by a model cannot answer
-  a confirmation prompt, so anything short of an outright allow is refused.
-- Cloud metadata endpoints, loopback and private ranges, and credential-bearing
-  URLs are decided by the host Network Policy, not by this package.
+## Workflows
+
+The built-in workflow manifests have schema version `1` and their own workflow
+version:
+
+- `passive-recon` runs `security_passive_recon`
+- `active-discovery` runs `security_active_discovery`
+
+Both direct and hosted commands call the same `WorkflowRunner` interface:
+
+```bash
+pawn-security scope validate <scope-file>
+pawn-security run passive-recon --scope <scope-file>
+```
+
+```text
+/security run passive-recon
+```
+
+The runner sorts explicit host targets and runs one workflow target at a time.
+The execution adapters consume the engagement-wide request budget before
+individual network requests. The runner does not expand a CIDR into hosts.
+`active-discovery` additionally requires an active scope; port-scan concurrency
+remains bounded by the scope.
+
+`/security plan <objective>` is deliberately conservative. It returns a
+deterministic suggestion to begin with `passive-recon`, reports that execution
+has not started, and performs no network work.
 
 ## Evidence
 
-Observations are appended to `<runtime home>/security/evidence.jsonl` as
-schema-versioned JSON lines. Records are never edited or deleted, timestamps
-are supplied by the caller, and credential-shaped values are redacted before
-anything is written.
+When the active scope sets `evidence_dir`, tool observations and run records
+are written there. A relative `evidence_dir` is resolved from the directory
+containing the scope file. Without `evidence_dir`, they fall back to:
 
-## Command line
-
-```bash
-pawn-security            # what this provides and how to enable it
-pawn-security --manifest # the manifest the host validates
+```text
+<runtime home>/security/evidence.jsonl
 ```
 
-The command reports status only. It cannot enable the Extension or perform
-security work.
+The direct command uses `PAWNLOGIC_HOME` when set, otherwise
+`~/.pawnlogic`, for that fallback only.
+
+Within the selected evidence directory, observations use `evidence.jsonl` and
+completed workflow records use canonical, schema-versioned JSON with
+restrictive permissions under:
+
+```text
+<evidence directory>/runs/<run-id>.json
+```
+
+`/security evidence list` shows run summaries. `/security evidence export
+<run-id>` writes the selected canonical run record to the active output sink.
+Export accepts only a fixed-format run ID; it does not accept an output path
+and does not create an evidence archive.
+
+## Trust boundaries
+
+- No scope, an expired scope, an excluded or unmatched target, an unauthorized
+  port, or an exhausted budget fails closed.
+- Active work requires explicit active authorization and ports.
+- Loopback, private, link-local, metadata, and credential-bearing targets are
+  still governed by PawnLogic Network Policy.
+- The package does not silently download scanners, wordlists, browsers,
+  containers, or system packages.
+- The optional child-process adapter is disabled by default. When explicitly
+  configured by an integrator, it executes a literal argument vector without a
+  shell only after the host Operation Policy allows it; current workflows do
+  not call it.
 
 ## Development
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
+python -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
 .venv/bin/python -m pytest -q
 .venv/bin/python -m ruff check .
 ```

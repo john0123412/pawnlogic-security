@@ -1,21 +1,26 @@
 """The ``pawn-security`` command.
 
-This is intentionally thin. It reports what the distribution provides and how
-to enable it inside a PawnLogic host; it does not perform security work, and it
-cannot enable itself.
+This is intentionally thin. It validates scope files and delegates workflow
+execution to the same scope-gated runner used by the PawnLogic Extension. It
+cannot enable the Extension inside a host.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from pawnlogic_security import __version__
+from pawnlogic_security.evidence import EvidenceLog
 from pawnlogic_security.extension import EXTENSION_NAME, MANIFEST
 from pawnlogic_security.scope import from_scope_file
 from pawnlogic_security.scope_file import load as load_scope_file
+from pawnlogic_security.scope_manager import ScopeManager
+from pawnlogic_security.workflows import WorkflowRunner, WorkflowRunStore
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -52,6 +57,17 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser.add_argument(
         "file",
         help="Path to the scope JSON file.",
+    )
+
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Run a built-in workflow through the shared scope-gated runner.",
+    )
+    run_parser.add_argument("workflow", help="Built-in workflow name.")
+    run_parser.add_argument(
+        "--scope",
+        required=True,
+        help="Path to the Engagement Scope JSON file.",
     )
 
     return parser
@@ -101,6 +117,35 @@ def _cmd_scope_validate(file: str) -> int:
     return 0
 
 
+def _cmd_run(workflow: str, scope_file: str) -> int:
+    manager = ScopeManager()
+    security_home = _runtime_home() / "security"
+    try:
+        manager.set_scope(Path(scope_file).expanduser())
+        evidence_path = manager.evidence_path(
+            security_home / "evidence.jsonl"
+        )
+        runner = WorkflowRunner(
+            evidence=EvidenceLog(path=evidence_path),
+            run_store=WorkflowRunStore(evidence_path.parent / "runs"),
+        )
+        result = asyncio.run(runner.run(workflow, manager))
+    except (OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    finally:
+        manager.close()
+    print(result.render())
+    return 0
+
+
+def _runtime_home() -> Path:
+    configured = os.environ.get("PAWNLOGIC_HOME")
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".pawnlogic"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -110,6 +155,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         # `pawn-security scope` with no subcommand shows scope help.
         build_parser().parse_args([*argv, "--help"] if argv else ["scope", "--help"])
         return 0  # pragma: no cover
+
+    if args.command == "run":
+        return _cmd_run(args.workflow, args.scope)
 
     if args.manifest:
         print(f"name:              {MANIFEST.name}")

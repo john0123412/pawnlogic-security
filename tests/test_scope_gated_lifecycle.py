@@ -45,6 +45,9 @@ def _scope_json(*, targets: list[str] | None = None, **extra: object) -> str:
         "authorized_by": "tester",
         "expires_at": 9999999999.0,
         "targets": targets or ["example.com"],
+        "max_requests": 10,
+        "max_concurrency": 1,
+        "max_duration": 60,
     }
     data.update(extra)
     return json.dumps(data)
@@ -72,10 +75,10 @@ def test_tools_appear_after_scope_set(tmp_path: Path):
 
     # Now contribute to get the tools (simulating what the host does).
     contributions = extension.contribute(ctx)
-    assert len(contributions.tools) == 2
+    assert len(contributions.tools) == 1
     names = {spec.name for spec in contributions.tools}
     assert "security_passive_recon" in names
-    assert "security_active_discovery" in names
+    assert "security_active_discovery" not in names
 
 
 def test_tools_disappear_after_scope_clear(tmp_path: Path):
@@ -101,17 +104,17 @@ def test_commands_always_present_regardless_of_scope(tmp_path: Path):
     start_contributions = extension.start(ctx)
 
     assert start_contributions.commands
-    assert start_contributions.commands[0].name == "security"
+    assert start_contributions.commands[0].name == "/security"
 
     scope_file = tmp_path / "scope.json"
     scope_file.write_text(_scope_json(), encoding="utf-8")
     extension.scope_manager.set_scope(scope_file)
     with_scope = extension.contribute(ctx)
-    assert with_scope.commands == ()  # contribute returns tools, not commands
+    assert [command.name for command in with_scope.commands] == ["/security"]
 
     extension.scope_manager.clear_scope()
     without_scope = extension.contribute(ctx)
-    assert without_scope.commands == ()
+    assert [command.name for command in without_scope.commands] == ["/security"]
 
 
 def test_stop_clears_scope_and_state(tmp_path: Path):

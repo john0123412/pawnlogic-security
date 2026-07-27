@@ -103,13 +103,16 @@ def test_validate_accepts_minimal_scope():
         "authorized_by": "me",
         "expires_at": 9999999999.0,
         "targets": ["a.example.com"],
+        "max_requests": 1,
+        "max_concurrency": 1,
+        "max_duration": 1,
     }
     scope_file = validate(data)
     assert scope_file.identifier == "min"
     assert scope_file.exclude == ()
     assert scope_file.ports == ()
     assert scope_file.actions == frozenset()
-    assert scope_file.max_requests == 0
+    assert scope_file.max_requests == 1
 
 
 def test_load_and_save_round_trip(tmp_path: Path):
@@ -200,6 +203,11 @@ def _scope_file_json(*, expires_at: float = 9999999999.0) -> str:
             "authorized_by": "tester",
             "expires_at": expires_at,
             "targets": ["example.com"],
+            "ports": ["443"],
+            "actions": ["passive"],
+            "max_requests": 100,
+            "max_concurrency": 2,
+            "max_duration": 60,
         }
     )
 

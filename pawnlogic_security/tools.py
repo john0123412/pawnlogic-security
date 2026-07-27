@@ -22,6 +22,7 @@ from core.network_policy import NetworkOperation, NetworkPolicy
 
 from pawnlogic_security.evidence import EvidenceLog
 from pawnlogic_security.scope import EngagementScope, authorize
+from pawnlogic_security.scope_manager import ScopeManager
 
 Clock = Callable[[], float]
 
@@ -57,12 +58,14 @@ class SecurityToolContext:
         evidence: EvidenceLog,
         clock: Clock,
         scope: EngagementScope | None = None,
+        scope_manager: ScopeManager | None = None,
         interactive: bool = False,
     ) -> None:
         self._policy = policy
         self._evidence = evidence
         self._clock = clock
         self._scope = scope
+        self._scope_manager = scope_manager
         self._interactive = interactive
 
     @property
@@ -84,8 +87,42 @@ class SecurityToolContext:
         )
         return ToolOutcome(allowed=False, reason=reason, target=target, rule=rule)
 
+    def refuse(
+        self, *, action: str, target: str, reason: str, rule: str
+    ) -> ToolOutcome:
+        """Record and return a fail-closed refusal from an execution adapter."""
+        return self._refuse(action, target, reason, rule)
+
+    def consume_requests(self, count: int) -> None:
+        """Charge work to the engagement-wide budget when one is available."""
+        if self._scope_manager is not None:
+            self._scope_manager.consume_requests(count)
+
+    def record_result(
+        self,
+        *,
+        action: str,
+        target: str,
+        outcome: str,
+        detail: Mapping[str, object],
+    ) -> None:
+        """Append evidence only after the attempted operation has a result."""
+        self._evidence.record(
+            recorded_at=self._clock(),
+            scope_id=self._scope.identifier if self._scope else "none",
+            action=action,
+            target=target,
+            outcome=outcome,
+            detail=detail,
+        )
+
     def authorize_target(
-        self, *, action: str, target: str, active_probe: bool
+        self,
+        *,
+        action: str,
+        target: str,
+        active_probe: bool,
+        resolved_addresses: tuple[str, ...] = (),
     ) -> ToolOutcome:
         """Run the full gate for one target and return the verdict."""
         now = self._clock()
@@ -102,6 +139,14 @@ class SecurityToolContext:
             )
 
         # An active probe additionally needs the scope to permit active work.
+        action_kind = "active" if active_probe else "passive"
+        if self._scope and not self._scope.allows_action(action_kind):
+            return self._refuse(
+                action,
+                scope_decision.normalized_target,
+                f"engagement scope does not permit {action_kind} operations",
+                f"scope:{action_kind}_not_permitted",
+            )
         if active_probe and not (self._scope and self._scope.allow_active):
             return self._refuse(
                 action,
@@ -112,13 +157,19 @@ class SecurityToolContext:
 
         # 2. Host Network Policy decides. The scope only reports its own state;
         #    it never claims the target is authorized.
+        network_target = str(target)
+        if "://" not in network_target:
+            network_target = f"https://{network_target}/"
         operation = NetworkOperation(
-            url=str(target),
+            url=network_target,
             tool_name=action,
             action=action,
             interactive=self._interactive,
             engagement_scope=self._scope.identifier if self._scope else None,
             scope_valid=True,
+            explicit_authorization=True,
+            authorized_targets=tuple(sorted(self._scope.targets)) if self._scope else (),
+            resolved_addresses=resolved_addresses,
             active_probe=active_probe,
         )
         decision = self._policy.evaluate(operation)
@@ -134,15 +185,6 @@ class SecurityToolContext:
                 decision.rule,
             )
 
-        # 4. Record the authorized observation.
-        self._evidence.record(
-            recorded_at=now,
-            scope_id=self._scope.identifier if self._scope else "none",
-            action=action,
-            target=decision.normalized_target,
-            outcome="allowed",
-            detail={"reason": decision.reason, "rule": decision.rule},
-        )
         return ToolOutcome(
             allowed=True,
             reason=decision.reason,
@@ -163,24 +205,48 @@ def make_passive_recon_handler(
 
     def handler(args: dict[str, object]) -> str:
         raw_target = _target_of(args)
-        outcome = context.authorize_target(
+        preliminary = context.authorize_target(
             action="security_passive_recon",
             target=raw_target,
             active_probe=False,
         )
-        if not outcome.allowed:
-            return outcome.render()
+        if not preliminary.allowed:
+            return preliminary.render()
 
-        from pawnlogic_security.recon import passive_recon
+        from pawnlogic_security.recon import passive_recon, resolve_scoped_target
 
         scope = context.scope
         if scope is None:
+            return preliminary.render()
+
+        resolved = resolve_scoped_target(
+            raw_target,
+            scope,
+            context._clock(),
+            consume_requests=context.consume_requests,
+        )
+        if resolved.error:
+            return context.refuse(
+                action="security_passive_recon",
+                target=resolved.hostname,
+                reason=resolved.error,
+                rule="scope:resolved_target",
+            ).render()
+        outcome = context.authorize_target(
+            action="security_passive_recon",
+            target=raw_target,
+            active_probe=False,
+            resolved_addresses=resolved.addresses,
+        )
+        if not outcome.allowed:
             return outcome.render()
 
         result = passive_recon(
             target=raw_target,
             scope=scope,
             now=context._clock(),
+            resolved=resolved,
+            consume_requests=context.consume_requests,
         )
 
         lines: list[str] = [f"passive recon: {result.target}"]
@@ -214,6 +280,16 @@ def make_passive_recon_handler(
             for error in result.errors:
                 lines.append(f"  warning: {error}")
 
+        context.record_result(
+            action="security_passive_recon",
+            target=outcome.target,
+            outcome="completed",
+            detail={
+                "addresses": list(result.scope_addresses),
+                "errors": list(result.errors),
+                "http_status": result.http.status if result.http else 0,
+            },
+        )
         return "\n".join(lines)
 
     return handler
@@ -226,24 +302,48 @@ def make_active_discovery_handler(
 
     def handler(args: dict[str, object]) -> str:
         raw_target = _target_of(args)
-        outcome = context.authorize_target(
+        preliminary = context.authorize_target(
             action="security_active_discovery",
             target=raw_target,
             active_probe=True,
         )
-        if not outcome.allowed:
-            return outcome.render()
+        if not preliminary.allowed:
+            return preliminary.render()
 
-        from pawnlogic_security.recon import active_port_scan
+        from pawnlogic_security.recon import active_port_scan, resolve_scoped_target
 
         scope = context.scope
         if scope is None:
+            return preliminary.render()
+
+        resolved = resolve_scoped_target(
+            raw_target,
+            scope,
+            context._clock(),
+            consume_requests=context.consume_requests,
+        )
+        if resolved.error:
+            return context.refuse(
+                action="security_active_discovery",
+                target=resolved.hostname,
+                reason=resolved.error,
+                rule="scope:resolved_target",
+            ).render()
+        outcome = context.authorize_target(
+            action="security_active_discovery",
+            target=raw_target,
+            active_probe=True,
+            resolved_addresses=resolved.addresses,
+        )
+        if not outcome.allowed:
             return outcome.render()
 
         results = active_port_scan(
             target=raw_target,
             scope=scope,
             now=context._clock(),
+            resolved=resolved,
+            consume_requests=context.consume_requests,
         )
 
         lines: list[str] = [f"port scan: {outcome.target}"]
@@ -258,6 +358,15 @@ def make_active_discovery_handler(
         for r in errors:
             lines.append(f"  {r.port}: error: {r.error}")
 
+        context.record_result(
+            action="security_active_discovery",
+            target=outcome.target,
+            outcome="completed",
+            detail={
+                "open_ports": [r.port for r in open_ports],
+                "errors": [r.error for r in errors],
+            },
+        )
         return "\n".join(lines)
 
     return handler

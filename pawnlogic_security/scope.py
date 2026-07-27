@@ -176,8 +176,8 @@ class EngagementScope:
     denied even if it is also in ``targets``. Exclusions are evaluated first,
     so the effect is always deny-first, never widen-first.
 
-    ``ports`` constrains the port that may appear in a target URL. An empty
-    tuple means all ports are allowed.
+    ``ports`` constrains every connection. An empty tuple authorizes no active
+    connection ports; there is deliberately no implicit common-port fallback.
     """
 
     identifier: str
@@ -186,6 +186,8 @@ class EngagementScope:
     authorized_by: str
     reference: str = ""
     allow_active: bool = False
+    actions: frozenset[str] = field(default_factory=frozenset)
+    destructive: bool = False
     exclude: frozenset[str] = field(default_factory=frozenset)
     ports: tuple[PortRange, ...] = ()
     max_requests: int = 0
@@ -220,9 +222,60 @@ class EngagementScope:
                 raise ValueError(f"scope exclusion is not a usable host or CIDR: {entry!r}")
             normalized_exclude.add(norm)
 
+        normalized_ports: list[PortRange] = []
+        occupied: list[tuple[int, int]] = []
+        for port_entry in self.ports:
+            if isinstance(port_entry, bool):
+                raise ValueError(f"scope port is invalid: {port_entry!r}")
+            if isinstance(port_entry, int):
+                parsed: PortRange | None = (
+                    port_entry if 0 < port_entry <= 65535 else None
+                )
+            elif (
+                isinstance(port_entry, tuple)
+                and len(port_entry) == 2
+                and all(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    for value in port_entry
+                )
+            ):
+                low, high = port_entry
+                parsed = port_entry if 0 < low <= high <= 65535 else None
+            else:
+                parsed = None
+            if parsed is None:
+                raise ValueError(f"scope port or range is invalid: {port_entry!r}")
+            low, high = (parsed, parsed) if isinstance(parsed, int) else parsed
+            if any(not (high < used_low or low > used_high) for used_low, used_high in occupied):
+                raise ValueError(
+                    f"scope port ranges overlap or repeat: {port_entry!r}"
+                )
+            occupied.append((low, high))
+            normalized_ports.append(parsed)
+
+        actions = frozenset(self.actions)
+        if any(action not in {"passive", "active"} for action in actions):
+            raise ValueError("actions may contain only 'passive' and 'active'")
+        if not actions:
+            actions = frozenset(
+                {"passive", "active"} if self.allow_active else {"passive"}
+            )
+        if "active" in actions and not self.allow_active:
+            raise ValueError("active action requires allow_active=true")
+        if self.allow_active and "active" not in actions:
+            raise ValueError("allow_active=true requires the active action")
+        if self.allow_active and not normalized_ports:
+            raise ValueError("active scopes must explicitly authorize ports")
+        if self.destructive:
+            raise ValueError(
+                "destructive operations are not implemented in pawnlogic-security 0.1"
+            )
+
         object.__setattr__(self, "identifier", self.identifier.strip())
         object.__setattr__(self, "targets", frozenset(normalized_targets))
         object.__setattr__(self, "exclude", frozenset(normalized_exclude))
+        object.__setattr__(self, "ports", tuple(normalized_ports))
+        object.__setattr__(self, "actions", actions)
         object.__setattr__(self, "expires_at", float(self.expires_at))
         object.__setattr__(self, "max_requests", int(self.max_requests))
         object.__setattr__(self, "max_concurrency", int(self.max_concurrency))
@@ -232,6 +285,14 @@ class EngagementScope:
 
     def is_expired(self, now: float) -> bool:
         return now >= self.expires_at
+
+    def allows_action(self, action: str) -> bool:
+        """Return whether the authorization record names ``action``."""
+        return action in self.actions
+
+    def allows_port(self, port: int) -> bool:
+        """Return whether ``port`` is explicitly named by the scope."""
+        return _port_in_ranges(port, self.ports)
 
     def _is_host_in_targets(self, host: str) -> bool:
         """Check whether ``host`` is in scope by exact match or CIDR membership."""
@@ -285,6 +346,26 @@ class EngagementScope:
                 reason=f"{host} is not named by engagement scope {self.identifier}",
                 normalized_target=host,
             )
+        try:
+            parsed = urlsplit(target if "://" in target else f"//{target}")
+            explicit_port = parsed.port
+        except ValueError:
+            return ScopeDecision(
+                authorized=False,
+                denial=ScopeDenial.MALFORMED_TARGET,
+                reason="target contains an invalid port",
+                normalized_target=host,
+            )
+        if explicit_port is not None and not self.allows_port(explicit_port):
+            return ScopeDecision(
+                authorized=False,
+                denial=ScopeDenial.PORT_NOT_IN_SCOPE,
+                reason=(
+                    f"port {explicit_port} is not named by engagement scope "
+                    f"{self.identifier}"
+                ),
+                normalized_target=host,
+            )
         return ScopeDecision(
             authorized=True,
             reason=f"{host} is named by engagement scope {self.identifier}",
@@ -319,6 +400,13 @@ def from_scope_file(scope_file: object, *, clock: float) -> EngagementScope:
 
     if not isinstance(scope_file, _ScopeFile):
         raise TypeError(f"expected ScopeFile, got {type(scope_file).__name__}")
+    del clock  # retained as a compatibility parameter for existing callers
+    parsed_ports: list[PortRange] = []
+    for raw in scope_file.ports:
+        parsed = _parse_port_range(raw)
+        if parsed is None:
+            raise ValueError(f"scope port or range is invalid: {raw!r}")
+        parsed_ports.append(parsed)
     return EngagementScope(
         identifier=scope_file.identifier,
         targets=frozenset(scope_file.targets),
@@ -326,7 +414,10 @@ def from_scope_file(scope_file: object, *, clock: float) -> EngagementScope:
         authorized_by=scope_file.authorized_by,
         reference=scope_file.reference,
         allow_active=scope_file.allow_active,
+        actions=scope_file.actions,
+        destructive=scope_file.destructive,
         exclude=frozenset(scope_file.exclude),
+        ports=tuple(parsed_ports),
         max_requests=scope_file.max_requests,
         max_concurrency=scope_file.max_concurrency,
         max_duration=scope_file.max_duration,

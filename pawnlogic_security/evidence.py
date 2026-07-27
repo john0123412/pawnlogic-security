@@ -17,6 +17,7 @@ import stat
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 SCHEMA_VERSION = 1
 
@@ -166,7 +167,7 @@ class EvidenceLog:
             action=redact_text(str(action)),
             target=redact_text(str(target)),
             outcome=redact_text(str(outcome)),
-            detail=_freeze(redacted_detail),
+            detail=cast(tuple[tuple[str, object], ...], _freeze(redacted_detail)),
         )
         self._records.append(entry)
         if self._path is not None:

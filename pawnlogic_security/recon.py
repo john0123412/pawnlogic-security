@@ -11,12 +11,14 @@ scope's concurrency and request budgets applied.
 
 from __future__ import annotations
 
+import ipaddress
 import socket
 import ssl
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from http.client import HTTPConnection, HTTPResponse, HTTPSConnection
+from typing import Any, cast
 
 from pawnlogic_security.scope import EngagementScope
 
@@ -63,6 +65,7 @@ class PortResult:
 
     port: int
     state: str  # "open", "closed", "error"
+    address: str = ""
     service: str = ""
     error: str = ""
 
@@ -80,32 +83,112 @@ class PassiveReconResult:
     errors: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class ScopedTarget:
+    """One hostname and the exact DNS answers approved for connection."""
+
+    hostname: str
+    dns: DnsResult
+    addresses: tuple[str, ...] = ()
+    error: str = ""
+
+
+BudgetConsumer = Callable[[int], None]
+
+
+class _PinnedHTTPConnection(HTTPConnection):
+    """HTTP connection whose socket endpoint is an already-approved IP."""
+
+    def __init__(
+        self,
+        hostname: str,
+        address: str,
+        *,
+        port: int,
+        timeout: float,
+    ) -> None:
+        super().__init__(hostname, port=port, timeout=timeout)
+        self._approved_address = address
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection(
+            (self._approved_address, self.port),
+            timeout=self.timeout,
+            source_address=None,
+        )
+
+
+class _PinnedHTTPSConnection(HTTPSConnection):
+    """HTTPS connection preserving hostname SNI over an approved IP socket."""
+
+    def __init__(
+        self,
+        hostname: str,
+        address: str,
+        *,
+        port: int,
+        timeout: float,
+    ) -> None:
+        context = ssl.create_default_context()
+        super().__init__(
+            hostname,
+            port=port,
+            timeout=timeout,
+            context=context,
+        )
+        self._approved_address = address
+        self._tls_context = context
+
+    def connect(self) -> None:
+        raw_socket = socket.create_connection(
+            (self._approved_address, self.port),
+            timeout=self.timeout,
+            source_address=None,
+        )
+        self.sock = self._tls_context.wrap_socket(
+            raw_socket,
+            server_hostname=self.host,
+        )
+
+
 def _resolve_dns(hostname: str, timeout: float = 5.0) -> DnsResult:
     """Resolve a hostname to IP addresses using the local resolver."""
     try:
         infos = socket.getaddrinfo(
             hostname, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
         )
-        addresses = sorted({info[4][0] for info in infos})
+        addresses = sorted({str(info[4][0]) for info in infos})
         return DnsResult(hostname=hostname, addresses=tuple(addresses))
     except (socket.gaierror, socket.herror, OSError) as error:
         return DnsResult(hostname=hostname, error=str(error))
 
 
-def _inspect_tls(hostname: str, port: int = 443, timeout: float = 5.0) -> TlsCertResult:
+def _inspect_tls(
+    hostname: str,
+    port: int = 443,
+    *,
+    address: str,
+    timeout: float = 5.0,
+) -> TlsCertResult:
     """Connect once and read the TLS certificate."""
     ctx = ssl.create_default_context()
     try:
-        with socket.create_connection((hostname, port), timeout=timeout) as sock:
+        with socket.create_connection((address, port), timeout=timeout) as sock:
             with ctx.wrap_socket(sock, server_hostname=hostname) as ssock:
-                cert = ssock.getpeercert()
+                cert = cast(dict[str, Any], ssock.getpeercert())
                 subject = dict(x[0] for x in cert.get("subject", ()))
                 issuer = dict(x[0] for x in cert.get("issuer", ()))
                 return TlsCertResult(
                     hostname=hostname,
                     port=port,
                     subject=subject.get("commonName", ""),
-                    issuer=issuer.get("organizationName", issuer.get("commonName", "")),
+                    issuer=str(
+                        issuer.get(
+                            "organizationName",
+                            issuer.get("commonName", ""),
+                        )
+                        or ""
+                    ),
                     not_before=cert.get("notBefore", ""),
                     not_after=cert.get("notAfter", ""),
                     serial=str(cert.get("serialNumber", "")),
@@ -127,21 +210,32 @@ _TECH_HINTS: Mapping[str, str] = {
 
 
 def _http_headers(
-    hostname: str, port: int = 443, *, use_https: bool = True, timeout: float = 5.0
+    hostname: str,
+    port: int = 443,
+    *,
+    address: str,
+    use_https: bool = True,
+    timeout: float = 5.0,
 ) -> HttpHeadersResult:
-    """Fetch HTTP headers with a HEAD request."""
+    """Fetch HTTP headers while connecting to a previously checked IP."""
     scheme = "https" if use_https else "http"
     url = f"{scheme}://{hostname}:{port}/"
     try:
+        conn: HTTPConnection
         if use_https:
-            conn = HTTPSConnection(
+            conn = _PinnedHTTPSConnection(
                 hostname,
+                address,
                 port=port,
                 timeout=timeout,
-                context=ssl.create_default_context(),
             )
         else:
-            conn = HTTPConnection(hostname, port=port, timeout=timeout)
+            conn = _PinnedHTTPConnection(
+                hostname,
+                address,
+                port=port,
+                timeout=timeout,
+            )
         conn.request("HEAD", "/", headers={"User-Agent": "pawnlogic-security/0.1"})
         resp: HTTPResponse = conn.getresponse()
         headers = {k.lower(): v for k, v in resp.getheaders()}
@@ -170,12 +264,72 @@ def _http_headers(
         return HttpHeadersResult(url=url, error=str(error))
 
 
+def resolve_scoped_target(
+    target: str,
+    scope: EngagementScope,
+    now: float,
+    *,
+    timeout: float = 5.0,
+    consume_requests: BudgetConsumer | None = None,
+) -> ScopedTarget:
+    """Resolve once and require every answer to remain inside Scope."""
+    from pawnlogic_security.scope import authorize as scope_authorize
+
+    decision = scope_authorize(scope, target, now)
+    if not decision.authorized:
+        empty = DnsResult(hostname=decision.normalized_target or target)
+        return ScopedTarget(
+            hostname=decision.normalized_target or target,
+            dns=empty,
+            error=decision.reason,
+        )
+    if consume_requests is not None:
+        try:
+            consume_requests(1)
+        except PermissionError as error:
+            empty = DnsResult(hostname=decision.normalized_target)
+            return ScopedTarget(
+                hostname=decision.normalized_target,
+                dns=empty,
+                error=str(error),
+            )
+    dns = _resolve_dns(decision.normalized_target, timeout=timeout)
+    if dns.error:
+        return ScopedTarget(hostname=decision.normalized_target, dns=dns, error=dns.error)
+    if not dns.addresses:
+        return ScopedTarget(
+            hostname=decision.normalized_target,
+            dns=dns,
+            error="DNS returned no addresses",
+        )
+    errors: list[str] = []
+    for address in dns.addresses:
+        address_decision = scope_authorize(scope, address, now)
+        if not address_decision.authorized:
+            errors.append(
+                f"resolved address {address} not in scope: {address_decision.reason}"
+            )
+    if errors:
+        return ScopedTarget(
+            hostname=decision.normalized_target,
+            dns=dns,
+            error="; ".join(errors),
+        )
+    return ScopedTarget(
+        hostname=decision.normalized_target,
+        dns=dns,
+        addresses=dns.addresses,
+    )
+
+
 def passive_recon(
     target: str,
     scope: EngagementScope,
     now: float,
     *,
     timeout: float = 5.0,
+    resolved: ScopedTarget | None = None,
+    consume_requests: BudgetConsumer | None = None,
 ) -> PassiveReconResult:
     """Run passive recon against one in-scope target.
 
@@ -193,34 +347,78 @@ def passive_recon(
 
     hostname = decision.normalized_target
 
-    # 1. DNS
-    dns = _resolve_dns(hostname, timeout=timeout)
-    if dns.error:
-        errors.append(f"dns: {dns.error}")
-
-    # 2. Check resolved addresses against scope
-    scope_addresses: list[str] = []
+    checked = resolved or resolve_scoped_target(
+        target,
+        scope,
+        now,
+        timeout=timeout,
+        consume_requests=consume_requests,
+    )
+    dns = checked.dns
+    if checked.error:
+        return PassiveReconResult(
+            target=target,
+            dns=dns,
+            errors=(checked.error,),
+        )
+    scope_addresses = list(checked.addresses)
     redirect_hops: list[str] = []
-    for addr in dns.addresses:
-        addr_decision = scope_authorize(scope, addr, now)
-        if addr_decision.authorized:
-            scope_addresses.append(addr)
-        else:
-            errors.append(
-                f"resolved address {addr} not in scope: {addr_decision.reason}"
-            )
+    address = checked.addresses[0]
 
-    # 3. TLS
-    tls = _inspect_tls(hostname, timeout=timeout)
-    if tls.error:
-        errors.append(f"tls: {tls.error}")
+    tls: TlsCertResult | None = None
+    http: HttpHeadersResult | None = None
+    if scope.allows_port(443):
+        if consume_requests is not None:
+            try:
+                consume_requests(1)
+            except PermissionError as error:
+                return PassiveReconResult(
+                    target=target,
+                    dns=dns,
+                    scope_addresses=tuple(scope_addresses),
+                    errors=(str(error),),
+                )
+        tls = _inspect_tls(hostname, address=address, timeout=timeout)
+        if tls.error:
+            errors.append(f"tls: {tls.error}")
 
-    # 4. HTTP headers (try HTTPS first, fall back to HTTP)
-    http = _http_headers(hostname, timeout=timeout)
-    if http.error:
-        http = _http_headers(hostname, port=80, use_https=False, timeout=timeout)
-        if http.error:
-            errors.append(f"http: {http.error}")
+        if consume_requests is not None:
+            try:
+                consume_requests(1)
+            except PermissionError as error:
+                return PassiveReconResult(
+                    target=target,
+                    dns=dns,
+                    tls=tls,
+                    scope_addresses=tuple(scope_addresses),
+                    errors=tuple([*errors, str(error)]),
+                )
+        http = _http_headers(hostname, address=address, timeout=timeout)
+
+    if (http is None or http.error) and scope.allows_port(80):
+        if consume_requests is not None:
+            try:
+                consume_requests(1)
+            except PermissionError as error:
+                return PassiveReconResult(
+                    target=target,
+                    dns=dns,
+                    tls=tls,
+                    http=http,
+                    scope_addresses=tuple(scope_addresses),
+                    errors=tuple([*errors, str(error)]),
+                )
+        http = _http_headers(
+            hostname,
+            port=80,
+            address=address,
+            use_https=False,
+            timeout=timeout,
+        )
+    if http is None:
+        errors.append("scope authorizes neither port 443 nor port 80")
+    elif http.error:
+        errors.append(f"http: {http.error}")
 
     return PassiveReconResult(
         target=target,
@@ -240,6 +438,8 @@ def active_port_scan(
     *,
     timeout: float = 2.0,
     max_workers: int = 10,
+    resolved: ScopedTarget | None = None,
+    consume_requests: BudgetConsumer | None = None,
 ) -> tuple[PortResult, ...]:
     """Scan ports permitted by the scope's port ranges and request budget.
 
@@ -252,14 +452,12 @@ def active_port_scan(
     if not decision.authorized:
         return (PortResult(port=0, state="error", error=decision.reason),)
 
-    if not scope.allow_active:
+    if not scope.allow_active or not scope.allows_action("active"):
         return (
             PortResult(
                 port=0, state="error", error="scope does not permit active operations"
             ),
         )
-
-    hostname = decision.normalized_target
 
     # Resolve ports from scope ranges.
     ports: list[int] = []
@@ -272,12 +470,28 @@ def active_port_scan(
             count = min(high - low + 1, 1024)
             ports.extend(range(low, low + count))
     if not ports:
-        # Default common ports if scope doesn't specify any.
-        ports = [80, 443, 8080, 8443]
+        return (
+            PortResult(
+                port=0,
+                state="error",
+                error="scope does not explicitly authorize any ports",
+            ),
+        )
 
-    # Apply request budget.
-    if scope.max_requests > 0:
-        ports = ports[: scope.max_requests]
+    checked = resolved or resolve_scoped_target(
+        target,
+        scope,
+        now,
+        timeout=timeout,
+        consume_requests=consume_requests,
+    )
+    if checked.error:
+        return (PortResult(port=0, state="error", error=checked.error),)
+    if consume_requests is not None:
+        try:
+            consume_requests(len(ports) * len(checked.addresses))
+        except PermissionError as error:
+            return (PortResult(port=0, state="error", error=str(error)),)
 
     # Apply concurrency cap.
     effective_workers = max_workers
@@ -286,25 +500,43 @@ def active_port_scan(
 
     results: list[PortResult] = []
 
-    def _scan_one(port: int) -> PortResult:
+    def _scan_one(address: str, port: int) -> PortResult:
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            result = sock.connect_ex((hostname, port))
-            sock.close()
+            family = (
+                socket.AF_INET6
+                if ipaddress.ip_address(address).version == 6
+                else socket.AF_INET
+            )
+            with socket.socket(family, socket.SOCK_STREAM) as sock:
+                sock.settimeout(timeout)
+                result = sock.connect_ex((address, port))
             if result == 0:
                 service = _guess_service(port)
-                return PortResult(port=port, state="open", service=service)
-            return PortResult(port=port, state="closed")
+                return PortResult(
+                    port=port,
+                    state="open",
+                    address=address,
+                    service=service,
+                )
+            return PortResult(port=port, state="closed", address=address)
         except OSError as error:
-            return PortResult(port=port, state="error", error=str(error))
+            return PortResult(
+                port=port,
+                state="error",
+                address=address,
+                error=str(error),
+            )
 
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-        futures = {executor.submit(_scan_one, port): port for port in ports}
+        futures = {
+            executor.submit(_scan_one, address, port): (address, port)
+            for address in checked.addresses
+            for port in ports
+        }
         for future in as_completed(futures):
             results.append(future.result())
 
-    return tuple(sorted(results, key=lambda r: r.port))
+    return tuple(sorted(results, key=lambda r: (r.address, r.port)))
 
 
 def _guess_service(port: int) -> str:
@@ -343,7 +575,9 @@ __all__ = [
     "HttpHeadersResult",
     "PassiveReconResult",
     "PortResult",
+    "ScopedTarget",
     "TlsCertResult",
     "active_port_scan",
     "passive_recon",
+    "resolve_scoped_target",
 ]

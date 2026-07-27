@@ -18,10 +18,15 @@ from pawnlogic_security.tools import (
 def _scope(*, allow_active: bool = False) -> EngagementScope:
     return EngagementScope(
         identifier="test",
-        targets=frozenset(["example.com"]),
+        targets=frozenset(["example.com", "93.184.216.0/24"]),
         expires_at=9999999999.0,
         authorized_by="tester",
         allow_active=allow_active,
+        actions=frozenset({"passive", "active"} if allow_active else {"passive"}),
+        ports=(80, 443),
+        max_requests=100,
+        max_concurrency=2,
+        max_duration=60,
     )
 
 
@@ -79,9 +84,18 @@ def test_passive_recon_calls_real_recon_when_allowed():
         scope_addresses=("93.184.216.34",),
     )
 
-    with patch(
-        "pawnlogic_security.recon.passive_recon", return_value=mock_result
-    ) as mock:
+    with (
+        patch(
+            "pawnlogic_security.recon._resolve_dns",
+            return_value=DnsResult(
+                hostname="example.com",
+                addresses=("93.184.216.34",),
+            ),
+        ),
+        patch(
+            "pawnlogic_security.recon.passive_recon", return_value=mock_result
+        ) as mock,
+    ):
         handler = make_passive_recon_handler(_context(_scope()))
         result = handler({"target": "https://example.com/"})
 
@@ -110,7 +124,7 @@ def test_active_discovery_refused_when_scope_forbids_active():
 def test_active_discovery_calls_port_scan_when_allowed():
     from unittest.mock import MagicMock
 
-    from pawnlogic_security.recon import PortResult
+    from pawnlogic_security.recon import DnsResult, PortResult
     from pawnlogic_security.tools import ToolOutcome
 
     mock_results = (
@@ -124,9 +138,19 @@ def test_active_discovery_calls_port_scan_when_allowed():
     )
     handler = make_active_discovery_handler(ctx)
 
-    with patch(
-        "pawnlogic_security.recon.active_port_scan", return_value=mock_results
-    ) as mock:
+    with (
+        patch(
+            "pawnlogic_security.recon._resolve_dns",
+            return_value=DnsResult(
+                hostname="example.com",
+                addresses=("93.184.216.34",),
+            ),
+        ),
+        patch(
+            "pawnlogic_security.recon.active_port_scan",
+            return_value=mock_results,
+        ) as mock,
+    ):
         result = handler({"target": "https://example.com/"})
 
     mock.assert_called_once()
@@ -138,7 +162,7 @@ def test_active_discovery_calls_port_scan_when_allowed():
 def test_active_discovery_reports_no_open_ports():
     from unittest.mock import MagicMock
 
-    from pawnlogic_security.recon import PortResult
+    from pawnlogic_security.recon import DnsResult, PortResult
     from pawnlogic_security.tools import ToolOutcome
 
     mock_results = (
@@ -152,7 +176,19 @@ def test_active_discovery_reports_no_open_ports():
     )
     handler = make_active_discovery_handler(ctx)
 
-    with patch("pawnlogic_security.recon.active_port_scan", return_value=mock_results):
+    with (
+        patch(
+            "pawnlogic_security.recon._resolve_dns",
+            return_value=DnsResult(
+                hostname="example.com",
+                addresses=("93.184.216.34",),
+            ),
+        ),
+        patch(
+            "pawnlogic_security.recon.active_port_scan",
+            return_value=mock_results,
+        ),
+    ):
         result = handler({"target": "https://example.com/"})
 
     assert "no open ports found" in result
@@ -166,7 +202,16 @@ def test_passive_recon_handles_dns_error():
         dns=DnsResult(hostname="example.com", error="DNS resolution failed"),
     )
 
-    with patch("pawnlogic_security.recon.passive_recon", return_value=mock_result):
+    with (
+        patch(
+            "pawnlogic_security.recon._resolve_dns",
+            return_value=DnsResult(
+                hostname="example.com",
+                addresses=("93.184.216.34",),
+            ),
+        ),
+        patch("pawnlogic_security.recon.passive_recon", return_value=mock_result),
+    ):
         handler = make_passive_recon_handler(_context(_scope()))
         result = handler({"target": "https://example.com/"})
 
@@ -182,7 +227,16 @@ def test_passive_recon_handles_tls_error():
         tls=TlsCertResult(hostname="example.com", port=443, error="connection refused"),
     )
 
-    with patch("pawnlogic_security.recon.passive_recon", return_value=mock_result):
+    with (
+        patch(
+            "pawnlogic_security.recon._resolve_dns",
+            return_value=DnsResult(
+                hostname="example.com",
+                addresses=("93.184.216.34",),
+            ),
+        ),
+        patch("pawnlogic_security.recon.passive_recon", return_value=mock_result),
+    ):
         handler = make_passive_recon_handler(_context(_scope()))
         result = handler({"target": "https://example.com/"})
 

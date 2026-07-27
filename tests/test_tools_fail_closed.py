@@ -81,25 +81,64 @@ def test_active_discovery_requires_a_scope_permitting_active_work():
     assert "scope:active_not_permitted" in result
 
 
-def test_active_discovery_is_refused_non_interactively_even_when_in_scope():
-    """Non-interactive confirmation must fail closed, not assume yes."""
-    scope = passive_scope(allow_active=True)
-    handler = make_active_discovery_handler(
-        make_context(scope=scope, interactive=False)
+def test_active_discovery_is_allowed_with_explicit_scope_authorization():
+    """The adapter must pass its verified Scope decision to Network Policy."""
+    scope = passive_scope(
+        targets=frozenset({"lab.example.com", "93.184.216.0/24"}),
+        allow_active=True,
+        actions=frozenset({"passive", "active"}),
+        ports=(443,),
     )
-    result = handler({"target": "https://lab.example.com"})
-    assert "refused" in result
+    context = make_context(scope=scope, interactive=False)
+
+    outcome = context.authorize_target(
+        action="security_active_discovery",
+        target="https://lab.example.com",
+        active_probe=True,
+        resolved_addresses=("93.184.216.34",),
+    )
+
+    assert outcome.allowed is True
 
 
 def test_in_scope_passive_recon_is_allowed_and_recorded():
-    context = make_context(scope=passive_scope())
+    from unittest.mock import patch
+
+    from pawnlogic_security.recon import DnsResult, PassiveReconResult
+
+    context = make_context(
+        scope=passive_scope(
+            targets=frozenset({"lab.example.com", "93.184.216.0/24"}),
+            ports=(443,),
+        )
+    )
     handler = make_passive_recon_handler(context)
-    result = handler({"target": "https://lab.example.com"})
+    with (
+        patch(
+            "pawnlogic_security.recon._resolve_dns",
+            return_value=DnsResult(
+                hostname="lab.example.com",
+                addresses=("93.184.216.34",),
+            ),
+        ),
+        patch(
+            "pawnlogic_security.recon.passive_recon",
+            return_value=PassiveReconResult(
+                target="lab.example.com",
+                dns=DnsResult(
+                    hostname="lab.example.com",
+                    addresses=("93.184.216.34",),
+                ),
+                scope_addresses=("93.184.216.34",),
+            ),
+        ),
+    ):
+        result = handler({"target": "https://lab.example.com"})
     # Authorization was allowed and recon was attempted (result is not a refusal).
     assert "refused" not in result
     assert "passive recon:" in result
     assert len(context.evidence) == 1
-    assert context.evidence.records[0].outcome == "allowed"
+    assert context.evidence.records[0].outcome == "completed"
 
 
 def test_refusals_are_recorded_as_evidence_too():
