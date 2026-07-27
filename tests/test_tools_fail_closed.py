@@ -95,7 +95,9 @@ def test_in_scope_passive_recon_is_allowed_and_recorded():
     context = make_context(scope=passive_scope())
     handler = make_passive_recon_handler(context)
     result = handler({"target": "https://lab.example.com"})
-    assert "allowed" in result
+    # Authorization was allowed and recon was attempted (result is not a refusal).
+    assert "refused" not in result
+    assert "passive recon:" in result
     assert len(context.evidence) == 1
     assert context.evidence.records[0].outcome == "allowed"
 

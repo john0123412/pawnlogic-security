@@ -159,14 +159,62 @@ def _target_of(args: Mapping[str, object]) -> str:
 def make_passive_recon_handler(
     context: SecurityToolContext,
 ) -> Callable[[dict[str, object]], str]:
-    """Passive reconnaissance: no packets are sent to the target."""
+    """Passive reconnaissance: DNS, TLS, HTTP headers, and technology fingerprint."""
 
     def handler(args: dict[str, object]) -> str:
-        return context.authorize_target(
+        raw_target = _target_of(args)
+        outcome = context.authorize_target(
             action="security_passive_recon",
-            target=_target_of(args),
+            target=raw_target,
             active_probe=False,
-        ).render()
+        )
+        if not outcome.allowed:
+            return outcome.render()
+
+        from pawnlogic_security.recon import passive_recon
+
+        scope = context.scope
+        if scope is None:
+            return outcome.render()
+
+        result = passive_recon(
+            target=raw_target,
+            scope=scope,
+            now=context._clock(),
+        )
+
+        lines: list[str] = [f"passive recon: {result.target}"]
+
+        if result.dns:
+            if result.dns.error:
+                lines.append(f"  dns: error: {result.dns.error}")
+            else:
+                lines.append(f"  dns: {', '.join(result.dns.addresses)}")
+
+        if result.tls:
+            if result.tls.error:
+                lines.append(f"  tls: error: {result.tls.error}")
+            else:
+                lines.append(f"  tls: subject={result.tls.subject} issuer={result.tls.issuer}")
+                lines.append(f"       valid={result.tls.not_before} to {result.tls.not_after}")
+
+        if result.http:
+            if result.http.error:
+                lines.append(f"  http: error: {result.http.error}")
+            else:
+                lines.append(f"  http: status={result.http.status}")
+                if result.http.server:
+                    lines.append(f"        server: {result.http.server}")
+                if result.http.technologies:
+                    lines.append(f"        tech: {'; '.join(result.http.technologies)}")
+
+        if result.scope_addresses:
+            lines.append(f"  scope-validated addresses: {', '.join(result.scope_addresses)}")
+        if result.errors:
+            for error in result.errors:
+                lines.append(f"  warning: {error}")
+
+        return "\n".join(lines)
 
     return handler
 
@@ -174,14 +222,43 @@ def make_passive_recon_handler(
 def make_active_discovery_handler(
     context: SecurityToolContext,
 ) -> Callable[[dict[str, object]], str]:
-    """Bounded active discovery: requires a scope that permits active work."""
+    """Bounded active discovery: port scanning within scope constraints."""
 
     def handler(args: dict[str, object]) -> str:
-        return context.authorize_target(
+        raw_target = _target_of(args)
+        outcome = context.authorize_target(
             action="security_active_discovery",
-            target=_target_of(args),
+            target=raw_target,
             active_probe=True,
-        ).render()
+        )
+        if not outcome.allowed:
+            return outcome.render()
+
+        from pawnlogic_security.recon import active_port_scan
+
+        scope = context.scope
+        if scope is None:
+            return outcome.render()
+
+        results = active_port_scan(
+            target=raw_target,
+            scope=scope,
+            now=context._clock(),
+        )
+
+        lines: list[str] = [f"port scan: {outcome.target}"]
+        open_ports = [r for r in results if r.state == "open"]
+        if open_ports:
+            for r in open_ports:
+                svc = f" ({r.service})" if r.service else ""
+                lines.append(f"  {r.port}/tcp open{svc}")
+        else:
+            lines.append("  no open ports found")
+        errors = [r for r in results if r.state == "error"]
+        for r in errors:
+            lines.append(f"  {r.port}: error: {r.error}")
+
+        return "\n".join(lines)
 
     return handler
 
