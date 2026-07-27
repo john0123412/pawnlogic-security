@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: "Build and verify"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip build twine
+      - name: Build wheel and sdist
+        run: python -m build
+      - name: Inspect wheel contents
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          import sys
+          wheel = next(Path("dist").glob("*.whl"))
+          with ZipFile(wheel) as zf:
+              names = zf.namelist()
+              has_security = any("pawnlogic_security/" in n for n in names)
+              has_tests = any("tests/" in n for n in names)
+              has_skills = any("skills/" in n for n in names)
+              print(f"wheel: {wheel.name}")
+              print(f"  pawnlogic_security: {has_security}")
+              print(f"  tests: {has_tests}")
+              print(f"  skills: {has_skills}")
+              if not has_security:
+                  sys.exit("package not found in wheel")
+              if has_tests:
+                  sys.exit("test files leaked into wheel")
+              if has_skills:
+                  sys.exit("skill packs leaked into wheel")
+          PY
+      - run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 5
+          if-no-files-found: error
+
+  testpypi:
+    name: "Publish to TestPyPI"
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+      - name: Smoke install from TestPyPI
+        run: |
+          python -m pip install --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ \
+            pawnlogic-security
+          python -c "import pawnlogic_security; print('installed', pawnlogic_security.__version__)"
+
+  pypi:
+    name: "Publish to PyPI"
+    needs: build
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Smoke install from PyPI
+        run: |
+          python -m pip install pawnlogic-security
+          python -c "import pawnlogic_security; print('installed', pawnlogic_security.__version__)"

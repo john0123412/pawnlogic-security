@@ -36,6 +36,8 @@ dev = [
     "pytest-timeout>=2.1",
     "ruff>=0.5",
     "mypy>=1.8",
+    "build>=1.0",
+    "twine>=5.0",
 ]
 
 [project.scripts]
