@@ -9,7 +9,8 @@ network tools remain unavailable until a valid Engagement Scope is active.
 
 ## Status
 
-This is an unpublished `0.1.0` alpha. The current checkout implements:
+The current public release is `0.1.0`, published independently of the
+PawnLogic core package. It implements:
 
 - a versioned Engagement Scope file with exact hosts, CIDRs, exclusions,
   explicit ports, passive/active actions, expiry, and request, concurrency, and
@@ -26,14 +27,22 @@ This is an unpublished `0.1.0` alpha. The current checkout implements:
 It does not implement HTTP replay, external scanner adapters, workflow YAML
 loading, CIDR expansion, exploit or destructive workflows, MCP execution, or
 an AI-generated planner. No built-in workflow invokes the optional child
-adapter. No release has been published to PyPI or TestPyPI.
+adapter.
 
 ## Requirements
 
 - Python 3.10 or newer
 - `pawnlogic>=0.3,<0.4`
 
-## Install from a checkout
+## Install
+
+Install the published package:
+
+```bash
+python -m pip install pawnlogic-security
+```
+
+For checkout development:
 
 ```bash
 python -m pip install -e .

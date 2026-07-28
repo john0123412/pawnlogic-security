@@ -7,8 +7,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-Target version `0.1.0`. Nothing has been published to PyPI or TestPyPI, so this
-section stays undated until a release is authorized.
+## [0.1.0] - 2026-07-28
 
 ### Added
 
