@@ -80,7 +80,7 @@ def test_real_host_registers_dispatches_and_preserves_security_command(
         registry,
         runtime_home=tmp_path / "runtime",
         entry_points=[_EntryPoint(extension)],
-        core_version="0.3.0",
+        core_version="0.4.0",
         command_register=register_owned_commands,
         command_unregister=unregister_owned_commands,
     )
@@ -152,7 +152,7 @@ def test_passive_scope_does_not_expose_active_tool_to_the_model(tmp_path: Path) 
         registry,
         runtime_home=tmp_path / "runtime",
         entry_points=[_EntryPoint(extension)],
-        core_version="0.3.0",
+        core_version="0.4.0",
     )
     try:
         assert manager.enable("security").state is ExtensionState.ENABLED

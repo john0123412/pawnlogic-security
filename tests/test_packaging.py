@@ -108,10 +108,10 @@ def test_wheel_has_correct_core_dependency(wheel_path: Path):
         for name in zf.namelist():
             if name.endswith("METADATA"):
                 metadata = zf.read(name).decode("utf-8")
-                # setuptools sorts version specifiers, so >=0.3,<0.4 becomes <0.4,>=0.3
+                # setuptools sorts version specifiers, so >=0.4,<0.5 becomes <0.5,>=0.4
                 assert "pawnlogic" in metadata
-                assert "0.3" in metadata
-                assert "0.4" in metadata
+                assert "0.5" in metadata
+                assert "0.5" in metadata
                 return
     pytest.fail("METADATA not found in wheel")
 

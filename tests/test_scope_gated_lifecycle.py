@@ -27,7 +27,7 @@ class _InertSink:
 def _context(tmp_path: Path, registry: ToolRegistry) -> ExtensionContext:
     return ExtensionContext(
         name=EXTENSION_NAME,
-        core_version="0.3.0",
+        core_version="0.4.0",
         runtime_home=tmp_path,
         config={},
         tools=_Registrar(),

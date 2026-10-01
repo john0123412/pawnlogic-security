@@ -28,7 +28,7 @@ classifiers = [
 
 # The host owns the Extension contracts this package implements, so the
 # supported core range is narrow on purpose.
-dependencies = ["pawnlogic>=0.3,<0.4"]
+dependencies = ["pawnlogic>=0.4,<0.5"]
 
 [project.optional-dependencies]
 dev = [

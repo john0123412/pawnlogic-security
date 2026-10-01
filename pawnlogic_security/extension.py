@@ -51,7 +51,7 @@ EXTENSION_NAME = "security"
 MANIFEST = ExtensionManifest(
     name=EXTENSION_NAME,
     version=__version__,
-    core_version_spec=">=0.3,<0.4",
+    core_version_spec=">=0.4,<0.5",
     api_version=API_VERSION,
     description="Scope-gated reconnaissance and discovery tools.",
     capabilities=frozenset({"network"}),

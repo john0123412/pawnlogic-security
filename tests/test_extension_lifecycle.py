@@ -50,7 +50,7 @@ class RecordingCommandSink:
 def make_context(tmp_path: Path) -> ExtensionContext:
     return ExtensionContext(
         name=EXTENSION_NAME,
-        core_version="0.3.0",
+        core_version="0.4.0",
         runtime_home=tmp_path,
         config={},
         tools=RecordingRegistrar(),
@@ -95,7 +95,7 @@ def test_manifest_declares_a_narrow_core_range_and_api_version():
     manifest = build_extension().manifest
     assert isinstance(manifest, ExtensionManifest)
     assert manifest.name == EXTENSION_NAME
-    assert manifest.core_version_spec == ">=0.3,<0.4"
+    assert manifest.core_version_spec == ">=0.4,<0.5"
     assert manifest.api_version == API_VERSION
 
 

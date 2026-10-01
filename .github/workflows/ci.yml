@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       core-ref:
-        description: "Override the source ref for the newest PawnLogic 0.3.x lane"
+        description: "Override the source ref for the newest PawnLogic 0.4.x lane"
         required: false
         default: ""
 
@@ -44,11 +44,11 @@ jobs:
       matrix:
         core:
           - lane: oldest
-            requirement: "pawnlogic==0.3.0"
-            source-ref: ${{ vars.PAWNLOGIC_OLDEST_03_REF || 'main' }}
+            requirement: "pawnlogic==0.4.0"
+            source-ref: ${{ vars.PAWNLOGIC_OLDEST_04_REF || 'main' }}
           - lane: newest
-            requirement: "pawnlogic>=0.3,<0.4"
-            source-ref: ${{ inputs.core-ref || vars.PAWNLOGIC_NEWEST_03_REF || 'main' }}
+            requirement: "pawnlogic>=0.4,<0.5"
+            source-ref: ${{ inputs.core-ref || vars.PAWNLOGIC_NEWEST_04_REF || 'main' }}
     steps:
       - uses: actions/setup-python@v6
         with:

@@ -12,7 +12,7 @@ def _workflow() -> str:
     return CI_WORKFLOW.read_text(encoding="utf-8")
 
 
-def test_ci_resolves_explicit_oldest_and_newest_03_lanes() -> None:
+def test_ci_resolves_explicit_oldest_and_newest_04_lanes() -> None:
     workflow = _workflow()
 
     oldest = workflow.index("lane: oldest")
@@ -21,18 +21,18 @@ def test_ci_resolves_explicit_oldest_and_newest_03_lanes() -> None:
 
     oldest_block = workflow[oldest:newest]
     newest_block = workflow[newest:]
-    assert 'requirement: "pawnlogic==0.3.0"' in oldest_block
+    assert 'requirement: "pawnlogic==0.4.0"' in oldest_block
     assert (
-        "source-ref: ${{ vars.PAWNLOGIC_OLDEST_03_REF || 'main' }}"
+        "source-ref: ${{ vars.PAWNLOGIC_OLDEST_04_REF || 'main' }}"
         in oldest_block
     )
-    assert 'requirement: "pawnlogic>=0.3,<0.4"' in newest_block
+    assert 'requirement: "pawnlogic>=0.4,<0.5"' in newest_block
     assert (
         "source-ref: ${{ inputs.core-ref || "
-        "vars.PAWNLOGIC_NEWEST_03_REF || 'main' }}"
+        "vars.PAWNLOGIC_NEWEST_04_REF || 'main' }}"
         in newest_block
     )
-    assert "release/0.3.0-prep" not in workflow
+    assert "release/0.4.0-prep" not in workflow
 
     pypi_attempt = workflow.index("Try the supported core release from PyPI")
     source_checkout = workflow.index("Build the core fallback from source")
