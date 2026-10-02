@@ -32,7 +32,7 @@ adapter.
 ## Requirements
 
 - Python 3.10 or newer
-- `pawnlogic>=0.3,<0.4`
+- `pawnlogic>=0.4,<0.5`
 
 ## Install
 

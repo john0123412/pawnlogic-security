@@ -198,9 +198,9 @@ def test_release_smoke_installs_and_checks_inside_a_fresh_venv(
     assert verify[0] == venv_python
     assert "import core" in verify[2]
     assert "pawnlogic_security.__version__" in verify[2]
-    assert "pawnlogic>=0.3,<0.4" in verify[2]
+    assert "pawnlogic>=0.4,<0.5" in verify[2]
     assert "core_parts[0] == '0'" in verify[2]
-    assert "core_parts[1] == '3'" in verify[2]
+    assert "core_parts[1] == '4'" in verify[2]
 
     cli = calls[2][0]
     assert cli == [str(environment_dir / "bin" / "pawn-security"), "--help"]

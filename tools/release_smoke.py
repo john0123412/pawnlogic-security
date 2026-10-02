@@ -127,8 +127,8 @@ def _install_and_verify(
                 "core_version = distribution_version('pawnlogic'); "
                 "core_parts = core_version.split('.'); "
                 "assert len(core_parts) >= 2 and core_parts[0] == '0' "
-                "and core_parts[1] == '3', "
-                "f'pawnlogic>=0.3,<0.4 required, installed {core_version}'; "
+                "and core_parts[1] == '4', "
+                "f'pawnlogic>=0.4,<0.5 required, installed {core_version}'; "
                 "print('installed pawnlogic-security', "
                 "pawnlogic_security.__version__, 'with pawnlogic', core_version)"
             ),

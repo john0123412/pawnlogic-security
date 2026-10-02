@@ -20,7 +20,7 @@ def test_manifest_flag(capsys):
     assert main(["--manifest"]) == 0
     out = capsys.readouterr().out
     assert "name:              security" in out
-    assert "core_version_spec: >=0.3,<0.4" in out
+    assert "core_version_spec: >=0.4,<0.5" in out
 
 
 def _write_valid_scope(path: Path, **overrides: object) -> None:
