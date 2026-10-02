@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from email import message_from_string
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -107,11 +108,10 @@ def test_wheel_has_correct_core_dependency(wheel_path: Path):
     with ZipFile(wheel_path) as zf:
         for name in zf.namelist():
             if name.endswith("METADATA"):
-                metadata = zf.read(name).decode("utf-8")
+                metadata = message_from_string(zf.read(name).decode("utf-8"))
+                requirements = metadata.get_all("Requires-Dist") or []
                 # setuptools sorts version specifiers, so >=0.4,<0.5 becomes <0.5,>=0.4
-                assert "pawnlogic" in metadata
-                assert "0.5" in metadata
-                assert "0.5" in metadata
+                assert "pawnlogic<0.5,>=0.4" in requirements, requirements
                 return
     pytest.fail("METADATA not found in wheel")
 
