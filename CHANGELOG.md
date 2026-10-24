@@ -7,6 +7,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-24
+
+### Fixed
+- Support PawnLogic core 0.4: the dependency range and the extension
+  manifest's `core_version_spec` move from `>=0.3,<0.4` to `>=0.4,<0.5`
+  (covers 0.4.6). The manifest spec is a hard gate — ExtensionManager
+  rejects the 0.1.0 release outright under pawnlogic 0.4.x with
+  "Extension is incompatible with this core version", so upgrading core
+  also requires this release. CI lanes now test against 0.4.0 (oldest)
+  and `>=0.4,<0.5` (newest); full suite verified against PawnLogic main.
+
 ## [0.1.0] - 2026-07-28
 
 ### Added
